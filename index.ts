@@ -7,11 +7,14 @@ export default definePluginEntry({
   name: "Firewall Plugin",
   description: "Adds a firewall to OpenClaw",
   register(api) {
-    const firewall = new Firewall({
-      apiKey: "INSERT_API_KEY",
-      apiUrl: "INSERT_URL",
-      shadowMode: true
-    });
+    const apiKey = api.pluginConfig?.apiKey;
+    const apiUrl = api.pluginConfig?.apiUrl;
+    if (!apiKey || !apiUrl) {
+      api.logger.warn("firewall-plugin: apiKey or apiUrl missing — plugin disabled");
+      return;
+    }
+
+    const firewall = new Firewall({ apiKey, apiUrl });
 
     api.on("before_tool_call", async (event) => {
       try {

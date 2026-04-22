@@ -20,6 +20,43 @@ cd FirewallPlugin
 npm install
 ```
 
+## Configuration
+
+Add your Silmaril API credentials to `~/.openclaw/.env`:
+
+```sh
+SILMARIL_API_KEY=sk-live-abc123...
+SILMARIL_API_URL=https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify
+```
+
+Then reference them in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "firewall-plugin": {
+        "enabled": true,
+        "config": {
+          "apiKey": {
+            "$secretRef": {
+              "provider": "env",
+              "key": "SILMARIL_API_KEY"
+            }
+          },
+          "apiUrl": {
+            "$secretRef": {
+              "provider": "env",
+              "key": "SILMARIL_API_URL"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 ## Installation
 
 Install the plugin into OpenClaw and restart the gateway:
