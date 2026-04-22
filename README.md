@@ -22,14 +22,7 @@ npm install
 
 ## Configuration
 
-Add your Silmaril API credentials to `~/.openclaw/.env`:
-
-```sh
-SILMARIL_API_KEY=sk-live-abc123...
-SILMARIL_API_URL=https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify
-```
-
-Then reference them in `~/.openclaw/openclaw.json`:
+Add your Silmaril API credentials to the firewall-plugin entry in `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -38,24 +31,16 @@ Then reference them in `~/.openclaw/openclaw.json`:
       "firewall-plugin": {
         "enabled": true,
         "config": {
-          "apiKey": {
-            "$secretRef": {
-              "provider": "env",
-              "key": "SILMARIL_API_KEY"
-            }
-          },
-          "apiUrl": {
-            "$secretRef": {
-              "provider": "env",
-              "key": "SILMARIL_API_URL"
-            }
-          }
+          "apiKey": "your-silmaril-api-key",
+          "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify"
         }
       }
     }
   }
 }
 ```
+
+The plugin reads these values from `api.pluginConfig` at startup. If either is missing, the plugin logs a warning and disables itself.
 
 ## Installation
 
