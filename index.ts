@@ -8,7 +8,7 @@ export default definePluginEntry({
   description: "Adds a firewall to OpenClaw",
   register(api) {
     const firewall = new Firewall({
-      apiKey: "INSERT_KEY",
+      apiKey: "INSERT_API_KEY",
       apiUrl: "INSERT_URL",
       shadowMode: true
     });
@@ -19,6 +19,7 @@ export default definePluginEntry({
           hook: HookLabel.TOOL_CALL,
           toolName: event.toolName,
         });
+        console.log(`[firewall] before_tool_call result:`, JSON.stringify(result));
       } catch (err) {
         console.error(`[firewall] before_tool_call error:`, err);
       }
@@ -26,10 +27,14 @@ export default definePluginEntry({
 
     api.on("tool_result_persist", async (event, _ctx) => {
       try {
-        const result = await firewall.classify(JSON.stringify(event.params), {
-          hook: HookLabel.TOOL_CALL,
+        const resultText = event?.message?.content
+          ?.map((c: { text?: string }) => c.text ?? "")
+          .join("\n") ?? "";
+        const result = await firewall.classify(resultText, {
+          hook: HookLabel.TOOL_RESPONSE,
           toolName: event.toolName,
         });
+        console.log(`[firewall] tool_result_persist result:`, JSON.stringify(result));
       } catch (err) {
         console.error(`[firewall] before_tool_call error:`, err);
       }
@@ -41,6 +46,7 @@ export default definePluginEntry({
         const result = await firewall.classify(event.prompt, {
           hook: HookLabel.USER_INPUT,
         });
+        console.log(`[firewall] before_prompt_build result:`, JSON.stringify(result));
       } catch (err) {
         console.error(`[firewall] before_prompt_build error:`, err);
       }
