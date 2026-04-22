@@ -1,0 +1,9 @@
+{
+  "id": "firewall-plugin",
+  "name": "firewall Plugin",
+  "description": "Adds a firewall to OpenClaw",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
