@@ -1,6 +1,7 @@
 // index.ts
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
+import { createFirewallExporter } from "./src/exporter/register-exporter";
 
 export default definePluginEntry({
   id: "firewall-plugin",
@@ -15,6 +16,13 @@ export default definePluginEntry({
     }
 
     const firewall = new Firewall({ apiKey, apiUrl });
+    const exporter = createFirewallExporter(api, { apiKey, apiUrl });
+
+    const logExporterWarning = (hook: string, err: unknown) => {
+      const message = `[firewall] exporter write failed in ${hook}: ${err instanceof Error ? err.message : String(err)}`;
+      api.logger?.warn?.(message);
+      console.warn(message);
+    };
 
     api.on("before_tool_call", async (event) => {
       try {
@@ -23,6 +31,16 @@ export default definePluginEntry({
           toolName: event.toolName,
         });
         console.log(`[firewall] before_tool_call result:`, JSON.stringify(result));
+        try {
+          await exporter.writeEvent({
+            source: "tool_call",
+            toolName: event.toolName,
+            payload: event.params,
+            firewallResult: result,
+          });
+        } catch (err) {
+          logExporterWarning("before_tool_call", err);
+        }
       } catch (err) {
         console.error(`[firewall] before_tool_call error:`, err);
       }
@@ -38,18 +56,43 @@ export default definePluginEntry({
           toolName: event.toolName,
         });
         console.log(`[firewall] tool_result_persist result:`, JSON.stringify(result));
+        try {
+          await exporter.writeEvent({
+            source: "tool_response",
+            toolName: event.toolName,
+            payload: {
+              text: resultText,
+            },
+            firewallResult: result,
+          });
+        } catch (err) {
+          logExporterWarning("tool_result_persist", err);
+        }
       } catch (err) {
         console.error(`[firewall] before_tool_call error:`, err);
       }
     });
 
     api.on("before_prompt_build", async (event) => {
-      if (typeof event?.prompt !== "string") return;
       try {
-        const result = await firewall.classify(event.prompt, {
-          hook: HookLabel.USER_INPUT,
-        });
-        console.log(`[firewall] before_prompt_build result:`, JSON.stringify(result));
+        const text = event?.prompt ?? "";
+        if (text) {
+          const result = await firewall.classify(text, {
+            hook: HookLabel.USER_INPUT,
+          });
+          console.log(`[firewall] before_prompt_build (USER_INPUT) result:`, JSON.stringify(result));
+          try {
+            await exporter.writeEvent({
+              source: "user_input",
+              payload: {
+                prompt: event.prompt,
+              },
+              firewallResult: result,
+            });
+          } catch (err) {
+            logExporterWarning("before_prompt_build", err);
+          }
+        }
       } catch (err) {
         console.error(`[firewall] before_prompt_build error:`, err);
       }
