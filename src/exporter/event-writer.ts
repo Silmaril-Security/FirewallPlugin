@@ -265,15 +265,23 @@ export class EventWriter {
   }
 
   async writeEvent(input: FirewallExportEventInput): Promise<void> {
-    await this.enqueue(async () => {
-      if (!this.accepting) {
-        if (!this.wroteBeforeStartWarning) {
-          this.runtime.logger.warn("exporter event ignored because writer is not started");
-          this.wroteBeforeStartWarning = true;
-        }
-        return;
+    if (!this.accepting) {
+      if (!this.wroteBeforeStartWarning) {
+        this.runtime.logger.warn("exporter event ignored because writer is not started");
+        this.wroteBeforeStartWarning = true;
       }
+      return;
+    }
 
+    const inputSnapshot: FirewallExportEventInput = {
+      source: input.source,
+      ...(input.hookName ? { hookName: input.hookName } : {}),
+      ...(input.toolName ? { toolName: input.toolName } : {}),
+      payload: toJsonSafe(input.payload),
+      ...(input.firewallResult !== undefined ? { firewallResult: toJsonSafe(input.firewallResult) } : {}),
+    };
+
+    await this.enqueue(async () => {
       const spoolBytes = await directorySize(this.runtime.paths.spoolDir);
       if (spoolBytes > MAX_SPOOL_BYTES) {
         if (!this.spoolFullWarningActive) {
@@ -297,10 +305,11 @@ export class EventWriter {
         ts: new Date().toISOString(),
         apiKeyPathId: this.runtime.apiKeyPathId,
         host: this.runtime.host,
-        source: input.source,
-        ...(input.toolName ? { toolName: input.toolName } : {}),
-        payload: input.payload,
-        ...(input.firewallResult !== undefined ? { firewallResult: input.firewallResult } : {}),
+        source: inputSnapshot.source,
+        ...(inputSnapshot.hookName ? { hookName: inputSnapshot.hookName } : {}),
+        ...(inputSnapshot.toolName ? { toolName: inputSnapshot.toolName } : {}),
+        payload: inputSnapshot.payload,
+        ...(inputSnapshot.firewallResult !== undefined ? { firewallResult: inputSnapshot.firewallResult } : {}),
       };
 
       const line = `${JSON.stringify(event)}\n`;
@@ -571,4 +580,84 @@ async function exists(filePath: string): Promise<boolean> {
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function toJsonSafe(value: unknown): unknown {
+  return makeJsonSafe(value, new WeakSet<object>());
+}
+
+function makeJsonSafe(value: unknown, seen: WeakSet<object>): unknown {
+  if (value === null) return null;
+
+  const valueType = typeof value;
+  if (valueType === "string" || valueType === "boolean") return value;
+  if (valueType === "number") return Number.isFinite(value) ? value : String(value);
+  if (valueType === "bigint") return value.toString();
+  if (valueType === "undefined") return undefined;
+  if (valueType === "symbol") return String(value);
+  if (valueType === "function") {
+    const fn = value as Function;
+    return `[Function${fn.name ? `: ${fn.name}` : ""}]`;
+  }
+
+  if (value instanceof Date) return value.toISOString();
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return {
+      type: "Buffer",
+      byteLength: value.byteLength,
+      base64: value.toString("base64"),
+    };
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    return {
+      type: view.constructor.name,
+      byteLength: view.byteLength,
+      base64: Buffer.from(view.buffer, view.byteOffset, view.byteLength).toString("base64"),
+    };
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return {
+      type: "ArrayBuffer",
+      byteLength: value.byteLength,
+      base64: Buffer.from(value).toString("base64"),
+    };
+  }
+
+  if (typeof value !== "object") return String(value);
+
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const result = value.map((item) => makeJsonSafe(item, seen));
+    seen.delete(value);
+    return result;
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    try {
+      const safeValue = makeJsonSafe((value as Record<string, unknown>)[key], seen);
+      if (safeValue !== undefined) {
+        result[key] = safeValue;
+      }
+    } catch (err) {
+      result[key] = `[Unserializable: ${formatError(err)}]`;
+    }
+  }
+
+  seen.delete(value);
+  return result;
 }

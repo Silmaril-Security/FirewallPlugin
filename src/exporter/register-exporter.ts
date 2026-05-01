@@ -7,6 +7,7 @@ import {
   apiKeyToPathId,
   ensureExporterDirectories,
 } from "./event-writer";
+import { registerHookTraceHandlers, writeHookTraceEvent } from "./hook-trace";
 import {
   type ExporterLogger,
   type ExporterPaths,
@@ -101,11 +102,15 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
     },
   };
 
-  api.on?.("gateway_start", async (_event, ctx) => {
+  registerHookTraceHandlers(api, exporter, logger);
+
+  api.on?.("gateway_start", async (event, ctx) => {
     await exporter.start(ctx);
+    await writeHookTraceEvent(exporter, "gateway_start", event, ctx, logger);
   });
 
-  api.on?.("gateway_stop", async () => {
+  api.on?.("gateway_stop", async (event, ctx) => {
+    await writeHookTraceEvent(exporter, "gateway_stop", event, ctx, logger);
     await exporter.stop();
   });
 

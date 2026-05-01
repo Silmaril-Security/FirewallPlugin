@@ -33,6 +33,9 @@ Add your Silmaril API credentials to the firewall-plugin entry in `~/.openclaw/o
         "config": {
           "apiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify"
+        },
+        "hooks": {
+          "allowConversationAccess": true
         }
       }
     }
@@ -41,6 +44,7 @@ Add your Silmaril API credentials to the firewall-plugin entry in `~/.openclaw/o
 ```
 
 The plugin reads these values from `api.pluginConfig` at startup. If either is missing, the plugin logs a warning and disables itself.
+`allowConversationAccess` lets the exporter observe conversation hooks such as `llm_input`, `llm_output`, `before_agent_finalize`, and `agent_end`.
 
 ## Installation
 
