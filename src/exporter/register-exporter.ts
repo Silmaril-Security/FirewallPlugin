@@ -73,7 +73,10 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
         writer.startAccepting();
         uploader.startPeriodicLoop();
         logger.info(`exporter started at ${paths.exportDir}`);
-      })();
+      })().catch((err) => {
+        startPromise = undefined;
+        throw err;
+      });
 
       return startPromise;
     },
@@ -94,7 +97,16 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
 
     async writeEvent(event: FirewallExportEventInput): Promise<void> {
       if (!writer) {
-        logger.warn("exporter event ignored because gateway_start has not completed");
+        try {
+          await exporter.start();
+        } catch (err) {
+          logger.warn("exporter event ignored because lazy start failed", err);
+          return;
+        }
+      }
+
+      if (!writer) {
+        logger.warn("exporter event ignored because writer is unavailable");
         return;
       }
 

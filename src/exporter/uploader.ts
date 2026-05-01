@@ -94,14 +94,21 @@ export class SegmentUploader {
 
     const raw = await readFile(filePath);
     const gzipped = await gzip(raw);
-    const s3Key = buildS3Key(this.runtime, seqStart, seqEnd, segmentMeta.firstTs);
+    const generatedS3Key = buildS3Key(this.runtime, seqStart, seqEnd, segmentMeta.firstTs);
     const lease = await this.getUploadLease();
+    const uploadKey = resolveS3PostKey(lease, generatedS3Key);
 
-    if (!s3Key.startsWith(lease.keyPrefix)) {
-      throw new Error(`S3 key ${s3Key} is outside lease prefix ${lease.keyPrefix}`);
+    if (!uploadKey.s3Key.startsWith(lease.keyPrefix)) {
+      throw new Error(`S3 key ${uploadKey.s3Key} is outside lease prefix ${lease.keyPrefix}`);
     }
 
-    await uploadWithPresignedPost(lease, s3Key, gzipped);
+    if (uploadKey.usesExactLeaseKey && uploadKey.s3Key !== generatedS3Key) {
+      this.runtime.logger.warn(
+        `upload lease pins S3 key ${uploadKey.s3Key}; generated key ${generatedS3Key} cannot be used with this policy`,
+      );
+    }
+
+    await uploadWithPresignedPost(lease, uploadKey.s3Key, gzipped);
 
     await this.checkpointStore.update((checkpoint) => {
       checkpoint.uploadedThroughSeq = Math.max(checkpoint.uploadedThroughSeq, seqEnd);
@@ -110,13 +117,22 @@ export class SegmentUploader {
         seqStart,
         seqEnd,
         s3Bucket: EXPORT_BUCKET,
-        s3Key,
+        s3Key: uploadKey.s3Key,
         uploadedAt: new Date().toISOString(),
       });
       checkpoint.recentUploads = checkpoint.recentUploads.slice(-RECENT_UPLOAD_LIMIT);
     });
 
+    if (uploadKey.usesExactLeaseKey) {
+      await this.invalidateCachedLease();
+    }
+
     await rm(filePath, { force: true });
+  }
+
+  private async invalidateCachedLease(): Promise<void> {
+    this.cachedLease = undefined;
+    await rm(this.runtime.paths.leasePath, { force: true });
   }
 
   private async getUploadLease(): Promise<UploadLease> {
@@ -165,6 +181,24 @@ export function buildS3Key(
   return `${EXPORT_ROOT_PREFIX}apiKey=${runtime.apiKeyPathId}/host=${runtime.host}/dt=${dt}/hour=${hour}/chunk-${padSeq(
     seqStart,
   )}-${padSeq(seqEnd)}.jsonl.gz`;
+}
+
+export function resolveS3PostKey(
+  lease: UploadLease,
+  generatedS3Key: string,
+): { s3Key: string; usesExactLeaseKey: boolean } {
+  const exactPolicyKey = getExactPolicyKey(lease.fields.Policy);
+  if (exactPolicyKey) {
+    return {
+      s3Key: exactPolicyKey,
+      usesExactLeaseKey: true,
+    };
+  }
+
+  return {
+    s3Key: generatedS3Key,
+    usesExactLeaseKey: false,
+  };
 }
 
 export function resolveUploadLeaseUrl(): string {
@@ -236,6 +270,37 @@ async function uploadWithPresignedPost(lease: UploadLease, s3Key: string, gzippe
   if (![200, 201, 204].includes(response.status)) {
     throw new Error(`S3 upload failed: ${response.status} ${response.statusText} ${await response.text()}`);
   }
+}
+
+function getExactPolicyKey(policyBase64: string | undefined): string | undefined {
+  if (!policyBase64) return undefined;
+
+  try {
+    const policy = JSON.parse(Buffer.from(policyBase64, "base64").toString("utf8")) as {
+      conditions?: unknown[];
+    };
+    if (!Array.isArray(policy.conditions)) return undefined;
+
+    for (const condition of policy.conditions) {
+      if (
+        Array.isArray(condition) &&
+        condition[0] === "eq" &&
+        condition[1] === "$key" &&
+        typeof condition[2] === "string"
+      ) {
+        return condition[2];
+      }
+
+      if (condition && typeof condition === "object" && !Array.isArray(condition)) {
+        const key = (condition as Record<string, unknown>).key;
+        if (typeof key === "string") return key;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
 }
 
 function isLeaseFresh(lease: UploadLease | undefined): lease is UploadLease {
