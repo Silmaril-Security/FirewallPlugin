@@ -17,6 +17,7 @@ import {
   SEGMENT_SIZE_LIMIT_BYTES,
   SEGMENT_TIME_LIMIT_MS,
   SEQUENCE_WIDTH,
+  FIXED_API_KEY_PATH_ID,
 } from "./types";
 import type {
   Checkpoint,
@@ -51,8 +52,8 @@ export type JsonlSegmentMeta = {
   firstTs?: string;
 };
 
-export function apiKeyToPathId(apiKey: string): string {
-  return Buffer.from(apiKey).toString("base64url");
+export function apiKeyToPathId(_apiKey: string): string {
+  return FIXED_API_KEY_PATH_ID;
 }
 
 export function padSeq(seq: number): string {

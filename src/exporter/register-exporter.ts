@@ -4,11 +4,11 @@ import path from "node:path";
 import {
   CheckpointStore,
   EventWriter,
-  apiKeyToPathId,
   ensureExporterDirectories,
 } from "./event-writer";
 import { registerHookTraceHandlers, writeHookTraceEvent } from "./hook-trace";
 import {
+  FIXED_API_KEY_PATH_ID,
   type ExporterLogger,
   type ExporterPaths,
   type ExporterRuntime,
@@ -51,7 +51,7 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
 
         runtime = {
           apiKey: options.apiKey,
-          apiKeyPathId: apiKeyToPathId(options.apiKey),
+          apiKeyPathId: FIXED_API_KEY_PATH_ID,
           host: safeHost(os.hostname()),
           paths,
           logger,

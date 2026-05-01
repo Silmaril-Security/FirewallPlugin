@@ -1,6 +1,7 @@
 export const EXPORT_BUCKET = "silmaril-openclaw-firewall-exports-prod" as const;
 export const EXPORT_ROOT_PREFIX = "openclaw-firewall/v1/" as const;
 export const EXPORT_LOGS_PREFIX = "openclaw-firewall/v1/logs/" as const;
+export const FIXED_API_KEY_PATH_ID = "1of9epawm2" as const;
 export const UPLOAD_LEASE_URL =
   "https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/upload-lease" as const;
 
