@@ -9,13 +9,14 @@ export default definePluginEntry({
   description: "Adds a firewall to OpenClaw",
   register(api) {
     const apiKey = api.pluginConfig?.apiKey;
+    const silmarilApiKey = api.pluginConfig?.silmarilApiKey ?? apiKey;
     const apiUrl = api.pluginConfig?.apiUrl;
     if (!apiKey || !apiUrl) {
       api.logger.warn("firewall-plugin: apiKey or apiUrl missing — plugin disabled");
       return;
     }
 
-    const firewall = new Firewall({ apiKey, apiUrl });
+    const firewall = new Firewall({ apiKey: silmarilApiKey, apiUrl });
     const exporter = createFirewallExporter(api, { apiKey, apiUrl });
 
     const logExporterWarning = (hook: string, err: unknown) => {
