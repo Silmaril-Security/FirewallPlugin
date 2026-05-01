@@ -64,14 +64,11 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
         await writer.recoverTmpSegments();
 
         uploader = new SegmentUploader(runtime, checkpointStore, writer);
-        try {
-          await uploader.uploadReadyChunks();
-        } catch (err) {
-          logger.warn("initial pending upload attempt failed; chunks will retry later", err);
-        }
-
         writer.startAccepting();
         uploader.startPeriodicLoop();
+        void uploader.kick().catch((err) => {
+          logger.warn("initial pending upload attempt failed; chunks will retry later", err);
+        });
         logger.info(`exporter started at ${paths.exportDir}`);
       })().catch((err) => {
         startPromise = undefined;
@@ -116,9 +113,13 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
 
   registerHookTraceHandlers(api, exporter, logger);
 
-  api.on?.("gateway_start", async (event, ctx) => {
-    await exporter.start(ctx);
-    await writeHookTraceEvent(exporter, "gateway_start", event, ctx, logger);
+  api.on?.("gateway_start", (event, ctx) => {
+    void exporter
+      .start(ctx)
+      .then(() => writeHookTraceEvent(exporter, "gateway_start", event, ctx, logger))
+      .catch((err) => {
+        logger.warn("exporter failed to start in background", err);
+      });
   });
 
   api.on?.("gateway_stop", async (event, ctx) => {
