@@ -6,8 +6,8 @@ import {
   EXPORT_BUCKET,
   EXPORT_ROOT_PREFIX,
   LEASE_REFRESH_THRESHOLD_MS,
-  LEASE_TTL_SECONDS,
   RECENT_UPLOAD_LIMIT,
+  UPLOAD_LEASE_URL,
   UPLOAD_LOOP_INTERVAL_MS,
 } from "./types";
 import type { ExporterRuntime, UploadLease } from "./types";
@@ -167,12 +167,8 @@ export function buildS3Key(
   )}-${padSeq(seqEnd)}.jsonl.gz`;
 }
 
-export function resolveUploadLeaseUrl(apiUrl: string): string {
-  const url = new URL(apiUrl);
-  url.pathname = "/v1/openclaw/firewall-export/upload-lease";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
+export function resolveUploadLeaseUrl(): string {
+  return UPLOAD_LEASE_URL;
 }
 
 async function readCachedLease(leasePath: string, logger: ExporterRuntime["logger"]): Promise<UploadLease | undefined> {
@@ -190,18 +186,16 @@ async function readCachedLease(leasePath: string, logger: ExporterRuntime["logge
 
 async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease> {
   const prefix = `${EXPORT_ROOT_PREFIX}apiKey=${runtime.apiKeyPathId}/`;
-  const response = await fetch(resolveUploadLeaseUrl(runtime.apiUrl), {
+  const response = await fetch(resolveUploadLeaseUrl(), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${runtime.apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      bucket: EXPORT_BUCKET,
       prefix,
       apiKeyPathId: runtime.apiKeyPathId,
       host: runtime.host,
-      leaseTtlSeconds: LEASE_TTL_SECONDS,
     }),
   });
 

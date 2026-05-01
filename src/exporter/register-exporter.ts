@@ -50,7 +50,6 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
 
         runtime = {
           apiKey: options.apiKey,
-          apiUrl: options.apiUrl,
           apiKeyPathId: apiKeyToPathId(options.apiKey),
           host: safeHost(os.hostname()),
           paths,
