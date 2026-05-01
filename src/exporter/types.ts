@@ -1,10 +1,12 @@
 export const EXPORT_BUCKET = "silmaril-openclaw-firewall-exports-prod" as const;
 export const EXPORT_ROOT_PREFIX = "openclaw-firewall/v1/" as const;
+export const EXPORT_LOGS_PREFIX = "openclaw-firewall/v1/logs/" as const;
 export const UPLOAD_LEASE_URL =
   "https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/upload-lease" as const;
 
 export const SEGMENT_SIZE_LIMIT_BYTES = 1024 * 1024;
 export const SEGMENT_TIME_LIMIT_MS = 30 * 1000;
+export const LEASE_MAX_AGE_MS = 30 * 60 * 1000;
 export const LEASE_REFRESH_THRESHOLD_MS = 15 * 60 * 1000;
 export const RECENT_UPLOAD_LIMIT = 100;
 export const MAX_SPOOL_BYTES = 512 * 1024 * 1024;
@@ -79,7 +81,12 @@ export type UploadLease = {
   url: string;
   fields: Record<string, string>;
   keyPrefix: string;
+  keyTemplate?: string;
+  contentType?: string;
+  maxObjectBytes?: number;
+  expiresInSeconds?: number;
   expiresAt: string;
+  fetchedAt: string;
 };
 
 export type Checkpoint = {
