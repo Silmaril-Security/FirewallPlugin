@@ -162,12 +162,12 @@ export class SegmentUploader {
   }
 
   private async getUploadLease(): Promise<UploadLease> {
-    if (isLeaseFresh(this.cachedLease, this.runtime)) {
+    if (isLeaseFresh(this.cachedLease)) {
       return this.cachedLease;
     }
 
     const cached = await readCachedLease(this.runtime.paths.leasePath, this.runtime.logger);
-    if (isLeaseFresh(cached, this.runtime)) {
+    if (isLeaseFresh(cached)) {
       this.cachedLease = cached;
       return cached;
     }
@@ -193,8 +193,13 @@ export class SegmentUploader {
   }
 }
 
-export function expectedLeasePrefix(runtime: Pick<ExporterRuntime, "apiKeyPathId">): string {
-  return `${EXPORT_LOGS_PREFIX}${runtime.apiKeyPathId}/`;
+export function isValidLeasePrefix(keyPrefix: string): boolean {
+  if (!keyPrefix.startsWith(EXPORT_LOGS_PREFIX) || !keyPrefix.endsWith("/")) {
+    return false;
+  }
+
+  const suffix = keyPrefix.slice(EXPORT_LOGS_PREFIX.length, -1);
+  return suffix.length > 0 && !suffix.includes("/") && !suffix.includes("..");
 }
 
 export function buildObjectKey(
@@ -236,7 +241,6 @@ async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      apiKeyPathId: runtime.apiKeyPathId,
       host: runtime.host,
     }),
   });
@@ -258,8 +262,7 @@ async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease
     throw new Error("upload lease policy pins an exact S3 key; expected reusable prefix policy");
   }
 
-  const prefix = expectedLeasePrefix(runtime);
-  if (lease.keyPrefix !== prefix) {
+  if (!isValidLeasePrefix(lease.keyPrefix)) {
     throw new Error(`upload lease returned unexpected keyPrefix: ${lease.keyPrefix}`);
   }
 
@@ -286,12 +289,9 @@ async function uploadWithPresignedPost(lease: UploadLease, s3Key: string, gzippe
   }
 }
 
-function isLeaseFresh(
-  lease: UploadLease | undefined,
-  runtime: Pick<ExporterRuntime, "apiKeyPathId">,
-): lease is UploadLease {
+function isLeaseFresh(lease: UploadLease | undefined): lease is UploadLease {
   if (!lease) return false;
-  if (lease.keyPrefix !== expectedLeasePrefix(runtime)) return false;
+  if (!isValidLeasePrefix(lease.keyPrefix)) return false;
   if (hasExactPolicyKey(lease.fields.Policy)) return false;
 
   const fetchedAtMs = Date.parse(lease.fetchedAt);
