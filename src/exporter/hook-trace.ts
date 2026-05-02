@@ -34,9 +34,11 @@ export async function writeHookTraceEvent(
   ctx: unknown,
   logger: ExporterLogger,
 ): Promise<void> {
+  const ts = new Date().toISOString();
   try {
     await exporter.writeEvent({
       source: "hook_event",
+      ts,
       hookName,
       payload: {
         event,

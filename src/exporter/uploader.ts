@@ -223,7 +223,7 @@ export function resolveUploadLeaseUrl(): string {
 async function readCachedLease(leasePath: string, logger: ExporterRuntime["logger"]): Promise<UploadLease | undefined> {
   try {
     const raw = await readFile(leasePath, "utf8");
-    return normalizeUploadLease(JSON.parse(raw));
+    return normalizeUploadLease(JSON.parse(stripJsonBom(raw)));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") {
@@ -377,6 +377,10 @@ function shouldRetryWithFreshObjectKey(err: unknown): boolean {
 
 function extractS3ErrorCode(body: string): string | undefined {
   return /<Code>([^<]+)<\/Code>/.exec(body)?.[1];
+}
+
+function stripJsonBom(raw: string): string {
+  return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
 }
 
 function hasExactPolicyKey(policyBase64: string | undefined): boolean {

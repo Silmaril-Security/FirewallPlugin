@@ -12,6 +12,12 @@ export const LEASE_REFRESH_THRESHOLD_MS = 15 * 60 * 1000;
 export const RECENT_UPLOAD_LIMIT = 100;
 export const MAX_SPOOL_BYTES = 512 * 1024 * 1024;
 export const UPLOAD_LOOP_INTERVAL_MS = 10 * 1000;
+export const FILE_COLLECTOR_LOOP_INTERVAL_MS = 5 * 1000;
+export const FILE_COLLECTOR_RECENT_EVENT_LIMIT = 5000;
+export const FILE_COLLECTOR_MAX_LINES_PER_FILE = 500;
+export const EVENT_SEQUENCER_LOOP_INTERVAL_MS = 1000;
+export const EVENT_REORDER_WINDOW_MS = 20 * 1000;
+export const EVENT_SEQUENCER_RECENT_EVENT_LIMIT = 5000;
 export const SEQUENCE_WIDTH = 12;
 
 export const TRACE_HOOKS = [
@@ -53,12 +59,20 @@ export const TRACE_HOOKS = [
 
 export type PluginHookName = (typeof TRACE_HOOKS)[number];
 
-export type ExportSource = "user_input" | "tool_call" | "tool_response" | "hook_event";
+export type ExportSource =
+  | "user_input"
+  | "tool_call"
+  | "tool_response"
+  | "hook_event"
+  | "agent_session_event"
+  | "gateway_log_event"
+  | "browser_telemetry_event";
 
 export type FirewallExportEvent = {
   schemaVersion: 1;
   seq: number;
   ts: string;
+  eventId?: string;
   apiKeyPathId: string;
   host: string;
   source: ExportSource;
@@ -70,6 +84,8 @@ export type FirewallExportEvent = {
 
 export type FirewallExportEventInput = {
   source: ExportSource;
+  ts?: string;
+  eventId?: string;
   hookName?: PluginHookName;
   toolName?: string;
   payload: unknown;
@@ -111,10 +127,17 @@ export type ExporterLogger = {
 };
 
 export type ExporterPaths = {
+  stateDir: string;
   exportDir: string;
   spoolDir: string;
   logsDir: string;
   checkpointPath: string;
+  collectorCheckpointPath: string;
+  sequencerCheckpointPath: string;
+  inboxDir: string;
+  inboxTmpDir: string;
+  inboxReadyDir: string;
+  lockPath: string;
   leasePath: string;
   logPath: string;
 };
@@ -128,7 +151,7 @@ export type ExporterRuntime = {
 };
 
 export type FirewallExporter = {
-  start(ctx?: unknown): Promise<void>;
+  startFromGateway(ctx?: unknown): Promise<void>;
   stop(): Promise<void>;
   writeEvent(event: FirewallExportEventInput): Promise<void>;
 };

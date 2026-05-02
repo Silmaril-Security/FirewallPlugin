@@ -1,4 +1,5 @@
-import { appendFile } from "node:fs/promises";
+import { appendFile, open, readFile, rm } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -6,6 +7,8 @@ import {
   EventWriter,
   ensureExporterDirectories,
 } from "./event-writer";
+import { DurableEventInbox, EventSequencer } from "./event-inbox";
+import { FileTelemetryCollector } from "./file-collector";
 import { registerHookTraceHandlers, writeHookTraceEvent } from "./hook-trace";
 import {
   FIXED_API_KEY_PATH_ID,
@@ -31,23 +34,46 @@ type ExporterOptions = {
   apiUrl: string;
 };
 
+type ExporterLock = {
+  fileHandle: FileHandle;
+  lockPath: string;
+};
+
 export function createFirewallExporter(api: PluginApi, options: ExporterOptions): FirewallExporter {
   const logger = new FileBackedExporterLogger(api);
   let runtime: ExporterRuntime | undefined;
   let checkpointStore: CheckpointStore | undefined;
   let writer: EventWriter | undefined;
   let uploader: SegmentUploader | undefined;
+  let inbox: DurableEventInbox | undefined;
+  let sequencer: EventSequencer | undefined;
+  let fileCollector: FileTelemetryCollector | undefined;
+  let exporterLock: ExporterLock | undefined;
   let startPromise: Promise<void> | undefined;
   let stopPromise: Promise<void> | undefined;
+  let wroteLockOwnedWarning = false;
 
   const exporter: FirewallExporter = {
-    async start(ctx?: unknown): Promise<void> {
+    async startFromGateway(ctx?: unknown): Promise<void> {
       if (startPromise) return startPromise;
 
       startPromise = (async () => {
         const paths = resolveExporterPaths(ctx, api);
         logger.setLogPath(paths.logPath);
         await ensureExporterDirectories(paths);
+        inbox = new DurableEventInbox(paths, logger);
+
+        const lock = await acquireExporterLock(paths.lockPath, logger);
+        if (!lock) {
+          if (!wroteLockOwnedWarning) {
+            logger.warn(`exporter not started because another process owns ${paths.lockPath}`);
+            wroteLockOwnedWarning = true;
+          }
+          startPromise = undefined;
+          return;
+        }
+        exporterLock = lock;
+        wroteLockOwnedWarning = false;
 
         runtime = {
           apiKey: options.apiKey,
@@ -65,13 +91,32 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
 
         uploader = new SegmentUploader(runtime, checkpointStore, writer);
         writer.startAccepting();
+        fileCollector = new FileTelemetryCollector(runtime, inbox, paths.collectorCheckpointPath);
+        sequencer = new EventSequencer(runtime, inbox, writer, paths.sequencerCheckpointPath, {
+          beforeDrain: () => fileCollector?.kick() ?? Promise.resolve(),
+        });
+        fileCollector.startPeriodicLoop();
+        sequencer.startPeriodicLoop();
         uploader.startPeriodicLoop();
+        void fileCollector.kick().catch((err) => {
+          logger.warn("initial file telemetry collector scan failed; files will retry later", err);
+        });
+        void sequencer.kick().catch((err) => {
+          logger.warn("initial event sequencer drain failed; events will retry later", err);
+        });
         void uploader.kick().catch((err) => {
           logger.warn("initial pending upload attempt failed; chunks will retry later", err);
         });
         logger.info(`exporter started at ${paths.exportDir}`);
       })().catch((err) => {
         startPromise = undefined;
+        const lock = exporterLock;
+        exporterLock = undefined;
+        if (lock) {
+          void releaseExporterLock(lock).catch((releaseErr) => {
+            logger.warn("failed to release exporter lock after start failure", releaseErr);
+          });
+        }
         throw err;
       });
 
@@ -82,10 +127,18 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
       if (stopPromise) return stopPromise;
 
       stopPromise = (async () => {
+        await startPromise?.catch(() => undefined);
+        await fileCollector?.stop();
+        await sequencer?.stop();
         writer?.stopAccepting();
         await writer?.flushActive();
         await uploader?.stop();
         await checkpointStore?.persist();
+        const lock = exporterLock;
+        exporterLock = undefined;
+        if (lock) {
+          await releaseExporterLock(lock);
+        }
         logger.info("exporter stopped");
       })();
 
@@ -93,29 +146,43 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
     },
 
     async writeEvent(event: FirewallExportEventInput): Promise<void> {
-      if (!writer) {
-        try {
-          await exporter.start();
-        } catch (err) {
-          logger.warn("exporter event ignored because lazy start failed", err);
-          return;
-        }
-      }
-
-      if (!writer) {
-        logger.warn("exporter event ignored because writer is unavailable");
+      const targetInbox = await ensureInbox();
+      try {
+        await targetInbox.enqueue(event);
+      } catch (err) {
+        logger.warn("exporter event ignored because inbox write failed", err);
         return;
       }
 
-      await writer.writeEvent(event);
+      if (!sequencer) {
+        try {
+          await exporter.startFromGateway();
+        } catch (err) {
+          logger.warn("exporter event queued but lazy start failed", err);
+        }
+      }
+
+      void sequencer?.kick().catch((err) => {
+        logger.warn("event sequencer drain failed after enqueue", err);
+      });
     },
   };
+
+  async function ensureInbox(): Promise<DurableEventInbox> {
+    if (inbox) return inbox;
+
+    const paths = resolveExporterPaths(undefined, api);
+    logger.setLogPath(paths.logPath);
+    await ensureExporterDirectories(paths);
+    inbox = new DurableEventInbox(paths, logger);
+    return inbox;
+  }
 
   registerHookTraceHandlers(api, exporter, logger);
 
   api.on?.("gateway_start", (event, ctx) => {
     void exporter
-      .start(ctx)
+      .startFromGateway(ctx)
       .then(() => writeHookTraceEvent(exporter, "gateway_start", event, ctx, logger))
       .catch((err) => {
         logger.warn("exporter failed to start in background", err);
@@ -142,10 +209,17 @@ function resolveExporterPaths(ctx: unknown, api: PluginApi): ExporterPaths {
 
   const exportDir = path.join(stateDir, "firewall-plugin", "export");
   return {
+    stateDir,
     exportDir,
     spoolDir: path.join(exportDir, "spool"),
     logsDir: path.join(exportDir, "logs"),
     checkpointPath: path.join(exportDir, "checkpoint.json"),
+    collectorCheckpointPath: path.join(exportDir, "collector-checkpoint.json"),
+    sequencerCheckpointPath: path.join(exportDir, "sequencer-checkpoint.json"),
+    inboxDir: path.join(exportDir, "inbox"),
+    inboxTmpDir: path.join(exportDir, "inbox", "tmp"),
+    inboxReadyDir: path.join(exportDir, "inbox", "ready"),
+    lockPath: path.join(exportDir, "exporter.lock"),
     leasePath: path.join(exportDir, "upload-lease.json"),
     logPath: path.join(exportDir, "logs", "exporter.log"),
   };
@@ -163,6 +237,76 @@ function getNestedString(value: unknown, pathParts: string[]): string | undefine
 
 function safeHost(host: string): string {
   return host.replace(/[\\/]/g, "_") || "unknown-host";
+}
+
+async function acquireExporterLock(lockPath: string, logger: ExporterLogger): Promise<ExporterLock | undefined> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fileHandle = await open(lockPath, "wx");
+      await fileHandle.writeFile(
+        `${JSON.stringify({
+          version: 1,
+          pid: process.pid,
+          host: os.hostname(),
+          startedAt: new Date().toISOString(),
+        })}\n`,
+        "utf8",
+      );
+      return { fileHandle, lockPath };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") {
+        logger.warn(`failed to acquire exporter lock at ${lockPath}`, err);
+        return undefined;
+      }
+
+      const existing = await readExistingLock(lockPath);
+      if (!existing?.pid) {
+        logger.warn(`exporter lock exists but cannot be verified at ${lockPath}`);
+        return undefined;
+      }
+
+      if (isProcessAlive(existing.pid)) {
+        return undefined;
+      }
+
+      logger.warn(`removing stale exporter lock at ${lockPath}`);
+      await rm(lockPath, { force: true }).catch((rmErr) => {
+        logger.warn(`failed to remove stale exporter lock at ${lockPath}`, rmErr);
+      });
+    }
+  }
+
+  return undefined;
+}
+
+async function releaseExporterLock(lock: ExporterLock): Promise<void> {
+  await lock.fileHandle.close().catch(() => undefined);
+  await rm(lock.lockPath, { force: true });
+}
+
+async function readExistingLock(lockPath: string): Promise<{ pid?: number } | undefined> {
+  try {
+    const parsed = JSON.parse(stripJsonBom(await readFile(lockPath, "utf8"))) as { pid?: unknown };
+    return Number.isSafeInteger(parsed.pid) && parsed.pid > 0 ? { pid: parsed.pid } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stripJsonBom(raw: string): string {
+  return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
 }
 
 class FileBackedExporterLogger implements ExporterLogger {

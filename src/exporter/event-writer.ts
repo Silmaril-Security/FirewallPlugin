@@ -90,6 +90,9 @@ export async function ensureExporterDirectories(paths: ExporterPaths): Promise<v
   await mkdir(paths.exportDir, { recursive: true });
   await mkdir(paths.spoolDir, { recursive: true });
   await mkdir(paths.logsDir, { recursive: true });
+  await mkdir(paths.inboxDir, { recursive: true });
+  await mkdir(paths.inboxTmpDir, { recursive: true });
+  await mkdir(paths.inboxReadyDir, { recursive: true });
 }
 
 export function initialCheckpoint(nextSeq = 1): Checkpoint {
@@ -189,7 +192,7 @@ export class CheckpointStore {
 
     try {
       const raw = await readFile(this.checkpointPath, "utf8");
-      checkpoint = normalizeCheckpoint(JSON.parse(raw));
+      checkpoint = normalizeCheckpoint(JSON.parse(stripJsonBom(raw)));
       if (!checkpoint) {
         throw new Error("checkpoint has invalid shape");
       }
@@ -276,6 +279,8 @@ export class EventWriter {
 
     const inputSnapshot: FirewallExportEventInput = {
       source: input.source,
+      ...(isValidTimestamp(input.ts) ? { ts: input.ts } : {}),
+      ...(input.eventId ? { eventId: input.eventId } : {}),
       ...(input.hookName ? { hookName: input.hookName } : {}),
       ...(input.toolName ? { toolName: input.toolName } : {}),
       payload: toJsonSafe(input.payload),
@@ -303,7 +308,8 @@ export class EventWriter {
       const event: FirewallExportEvent = {
         schemaVersion: 1,
         seq,
-        ts: new Date().toISOString(),
+        ts: inputSnapshot.ts ?? new Date().toISOString(),
+        ...(inputSnapshot.eventId ? { eventId: inputSnapshot.eventId } : {}),
         apiKeyPathId: this.runtime.apiKeyPathId,
         host: this.runtime.host,
         source: inputSnapshot.source,
@@ -583,7 +589,15 @@ function formatError(err: unknown): string {
   return String(err);
 }
 
-function toJsonSafe(value: unknown): unknown {
+function stripJsonBom(raw: string): string {
+  return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+}
+
+export function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
+}
+
+export function toJsonSafe(value: unknown): unknown {
   return makeJsonSafe(value, new WeakSet<object>());
 }
 
