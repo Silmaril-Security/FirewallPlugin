@@ -2,16 +2,21 @@
   "id": "firewall-plugin",
   "name": "Firewall Plugin",
   "description": "Adds a firewall to OpenClaw",
+  "skills": ["skills"],
   "configSchema": {
     "type": "object",
     "additionalProperties": true,
     "properties": {
       "apiKey": { "type": "string" },
-      "apiUrl": { "type": "string" }
+      "silmarilApiKey": { "type": "string" },
+      "apiUrl": { "type": "string" },
+      "falsePositiveReportUrl": { "type": "string" }
     }
   },
   "uiHints": {
     "apiKey": { "label": "API Key", "sensitive": true },
-    "apiUrl": { "label": "API URL" }
+    "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
+    "apiUrl": { "label": "API URL" },
+    "falsePositiveReportUrl": { "label": "False Positive Report URL" }
   }
 }

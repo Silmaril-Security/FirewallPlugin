@@ -2,6 +2,12 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
 import { createFirewallExporter } from "./src/exporter/register-exporter";
+import {
+  FALSE_POSITIVE_TOOL_NAME,
+  createFalsePositiveReportTool,
+  resolveFalsePositiveReportUrl,
+  validateAndBuildFalsePositiveReport,
+} from "./src/false-positive-reporting";
 
 export default definePluginEntry({
   id: "firewall-plugin",
@@ -11,8 +17,51 @@ export default definePluginEntry({
     const apiKey = api.pluginConfig?.apiKey;
     const silmarilApiKey = api.pluginConfig?.silmarilApiKey ?? apiKey;
     const apiUrl = api.pluginConfig?.apiUrl;
+    const falsePositiveReportUrl = resolveFalsePositiveReportUrl(api.pluginConfig?.falsePositiveReportUrl);
+
+    api.registerTool(
+      createFalsePositiveReportTool({
+        reportUrl: falsePositiveReportUrl,
+        logger: api.logger,
+      }),
+      { optional: true },
+    );
+
+    api.on(
+      "before_tool_call",
+      async (event) => {
+        if (event.toolName !== FALSE_POSITIVE_TOOL_NAME) {
+          return;
+        }
+
+        const validation = validateAndBuildFalsePositiveReport(event.params);
+        if (!validation.ok) {
+          return {
+            block: true,
+            blockReason: `False-positive candidate report blocked: ${validation.errors.join("; ")}`,
+          };
+        }
+
+        return {
+          requireApproval: {
+            title: "Submit firewall false-positive candidate",
+            description:
+              "POST a sanitized suspected_false_positive candidate to the configured firewall review queue. This does not create a ground-truth label.",
+            severity: "warning",
+            timeoutMs: 60_000,
+            timeoutBehavior: "deny",
+            pluginId: "firewall-plugin",
+            onResolution(decision) {
+              api.logger?.info?.(`firewall-plugin: false-positive report approval resolved as ${decision}`);
+            },
+          },
+        };
+      },
+      { priority: 1000 },
+    );
+
     if (!apiKey || !apiUrl) {
-      api.logger.warn("firewall-plugin: apiKey or apiUrl missing — plugin disabled");
+      api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifier hooks disabled");
       return;
     }
 
@@ -38,6 +87,10 @@ export default definePluginEntry({
     };
 
     api.on("before_tool_call", async (event) => {
+      if (event.toolName === FALSE_POSITIVE_TOOL_NAME) {
+        return;
+      }
+
       const ts = new Date().toISOString();
       try {
         const text = JSON.stringify(event.params);
