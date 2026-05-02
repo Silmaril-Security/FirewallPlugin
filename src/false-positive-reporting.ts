@@ -1,6 +1,6 @@
-export const FALSE_NEGATIVE_TOOL_NAME = "firewall_report_false_negative" as const;
+export const FALSE_POSITIVE_TOOL_NAME = "firewall_report_false_positive" as const;
 
-export const DEFAULT_FALSE_NEGATIVE_REPORT_URL =
+export const DEFAULT_FALSE_POSITIVE_REPORT_URL =
   "https://j8sqlvv9pi.execute-api.us-west-2.amazonaws.com/prod/webhook" as const;
 
 type Logger = {
@@ -9,32 +9,29 @@ type Logger = {
   error?: (message: string) => void;
 };
 
-type FalseNegativeEvidence = {
-  detector_id: string;
+type FalsePositiveEvidence = {
+  rule_id: string;
   timestamp: string;
-  hook: string;
-  tool_name: string;
-  observed_label: string;
-  observed_score: string;
-  expected_label: string;
+  blocked_action: string;
+  expected_task: string;
   repeatability: string;
-  content_hash: string;
+  blocked_url_hash: string;
   sanitized_context: string;
 };
 
-export type FalseNegativeReportPayload = {
+export type FalsePositiveReportPayload = {
   event_id: string;
   source: "openclaw";
-  label: "suspected_false_negative";
+  label: "suspected_false_positive";
   reason: string;
-  evidence: FalseNegativeEvidence;
+  evidence: FalsePositiveEvidence;
   confidence: number;
 };
 
 type ValidationResult =
   | {
       ok: true;
-      payload: FalseNegativeReportPayload;
+      payload: FalsePositiveReportPayload;
     }
   | {
       ok: false;
@@ -52,28 +49,22 @@ type ToolResultDetails = {
 const FIELD_LIMITS = {
   event_id: 256,
   reason: 1000,
-  detector_id: 128,
+  rule_id: 128,
   timestamp: 128,
-  hook: 128,
-  tool_name: 128,
-  observed_label: 128,
-  observed_score: 128,
-  expected_label: 128,
+  blocked_action: 512,
+  expected_task: 512,
   repeatability: 512,
-  content_hash: 256,
+  blocked_url_hash: 256,
   sanitized_context: 2000,
 } as const;
 
 const EVIDENCE_FIELDS = [
-  "detector_id",
+  "rule_id",
   "timestamp",
-  "hook",
-  "tool_name",
-  "observed_label",
-  "observed_score",
-  "expected_label",
+  "blocked_action",
+  "expected_task",
   "repeatability",
-  "content_hash",
+  "blocked_url_hash",
   "sanitized_context",
 ] as const;
 
@@ -93,15 +84,15 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\b(?:\d[ -]*?){13,19}\b/, reason: "payment-card-like value" },
 ];
 
-export function createFalseNegativeReportTool(options: {
+export function createFalsePositiveReportTool(options: {
   reportUrl?: string;
   logger?: Logger;
 }) {
   return {
-    name: FALSE_NEGATIVE_TOOL_NAME,
-    label: "Report Firewall False Negative",
+    name: FALSE_POSITIVE_TOOL_NAME,
+    label: "Report Firewall False Positive",
     description:
-      "Submit a sanitized candidate report for a suspected firewall false negative. Use only when the firewall classification appears to have missed malicious or prompt-injection content, evidence is complete, and the report is not a ground-truth label.",
+      "Submit a sanitized candidate report for a suspected firewall false positive. Use only when the firewall blocked an expected low-impact action, evidence is complete, and the report is not a ground-truth label.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -113,7 +104,18 @@ export function createFalseNegativeReportTool(options: {
         reason: {
           type: "string",
           description:
-            "Short sanitized reason this is suspected to be a false negative, not a ground-truth label.",
+            "Short sanitized reason this is suspected to be a false positive, not a ground-truth label.",
+        },
+        source: {
+          type: "string",
+          enum: ["openclaw"],
+          description: 'Optional fixed source. If supplied, it must be "openclaw".',
+        },
+        label: {
+          type: "string",
+          enum: ["suspected_false_positive"],
+          description:
+            'Optional fixed candidate label. If supplied, it must be "suspected_false_positive".',
         },
         confidence: {
           type: "number",
@@ -125,41 +127,29 @@ export function createFalseNegativeReportTool(options: {
           type: "object",
           additionalProperties: false,
           properties: {
-            detector_id: {
+            rule_id: {
               type: "string",
-              description: "Firewall detector, model, or rule id that produced the observed label.",
+              description: "Firewall rule or detector id that blocked the action.",
             },
             timestamp: {
               type: "string",
-              description: "Timestamp of the observed event, preferably ISO 8601.",
+              description: "Timestamp of the blocked event, preferably ISO 8601.",
             },
-            hook: {
+            blocked_action: {
               type: "string",
-              description: "OpenClaw hook where the miss was observed, such as tool_result_persist.",
+              description: "Short sanitized description of the action that was blocked.",
             },
-            tool_name: {
+            expected_task: {
               type: "string",
-              description: "Tool name associated with the content, or none if not tool-related.",
-            },
-            observed_label: {
-              type: "string",
-              description: "Classifier label that was observed, such as BENIGN.",
-            },
-            observed_score: {
-              type: "string",
-              description: "Classifier score as a short string.",
-            },
-            expected_label: {
-              type: "string",
-              description: "Sanitized expected class, such as prompt_injection.",
+              description: "Short sanitized description of the user's task that made the action expected.",
             },
             repeatability: {
               type: "string",
-              description: "Sanitized evidence that the same miss is repeatable.",
+              description: "Sanitized evidence that the same block is repeatable.",
             },
-            content_hash: {
+            blocked_url_hash: {
               type: "string",
-              description: "Hash of the fetched page, tool result, or content sample. Do not include the raw URL.",
+              description: "Hash of the blocked URL or network target. Do not include the raw URL.",
             },
             sanitized_context: {
               type: "string",
@@ -172,10 +162,10 @@ export function createFalseNegativeReportTool(options: {
       required: ["event_id", "reason", "confidence", "evidence"],
     },
     async execute(_id: string, params: Record<string, unknown>) {
-      const validation = validateAndBuildFalseNegativeReport(params);
+      const validation = validateAndBuildFalsePositiveReport(params);
       if (!validation.ok) {
         return textResult(
-          `False-negative candidate was not submitted: ${validation.errors.join("; ")}`,
+          `False-positive candidate was not submitted: ${validation.errors.join("; ")}`,
           {
             submitted: false,
             status: "blocked",
@@ -187,7 +177,7 @@ export function createFalseNegativeReportTool(options: {
       const endpoint = resolveReportEndpoint(options.reportUrl);
       if (!endpoint.ok) {
         return textResult(
-          `False-negative candidate was not submitted: ${endpoint.error}`,
+          `False-positive candidate was not submitted: ${endpoint.error}`,
           {
             submitted: false,
             status: "failed",
@@ -208,7 +198,7 @@ export function createFalseNegativeReportTool(options: {
 
         if (!response.ok) {
           return textResult(
-            `False-negative candidate submission failed with HTTP ${response.status}.`,
+            `False-positive candidate submission failed with HTTP ${response.status}.`,
             {
               submitted: false,
               status: "failed",
@@ -219,9 +209,9 @@ export function createFalseNegativeReportTool(options: {
         }
 
         options.logger?.info?.(
-          `firewall-plugin: submitted suspected false-negative candidate to ${endpoint.url.host}`,
+          `firewall-plugin: submitted suspected false-positive candidate to ${endpoint.url.host}`,
         );
-        return textResult("Submitted suspected firewall false-negative candidate for review.", {
+        return textResult("Submitted suspected firewall false-positive candidate for review.", {
           submitted: true,
           status: "submitted",
           endpointHost: endpoint.url.host,
@@ -229,8 +219,8 @@ export function createFalseNegativeReportTool(options: {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        options.logger?.warn?.(`firewall-plugin: false-negative report submission failed: ${message}`);
-        return textResult(`False-negative candidate submission failed: ${message}`, {
+        options.logger?.warn?.(`firewall-plugin: false-positive report submission failed: ${message}`);
+        return textResult(`False-positive candidate submission failed: ${message}`, {
           submitted: false,
           status: "failed",
           endpointHost: endpoint.url.host,
@@ -240,7 +230,7 @@ export function createFalseNegativeReportTool(options: {
   };
 }
 
-export function validateAndBuildFalseNegativeReport(rawParams: unknown): ValidationResult {
+export function validateAndBuildFalsePositiveReport(rawParams: unknown): ValidationResult {
   const errors: string[] = [];
   if (!isRecord(rawParams)) {
     return { ok: false, errors: ["tool parameters must be an object"] };
@@ -257,15 +247,22 @@ export function validateAndBuildFalseNegativeReport(rawParams: unknown): Validat
 
   const evidence = isRecord(evidenceRaw)
     ? {
-        detector_id: readRequiredString(evidenceRaw, "detector_id", FIELD_LIMITS.detector_id, errors),
+        rule_id: readRequiredString(evidenceRaw, "rule_id", FIELD_LIMITS.rule_id, errors),
         timestamp: readRequiredString(evidenceRaw, "timestamp", FIELD_LIMITS.timestamp, errors),
-        hook: readRequiredString(evidenceRaw, "hook", FIELD_LIMITS.hook, errors),
-        tool_name: readRequiredString(evidenceRaw, "tool_name", FIELD_LIMITS.tool_name, errors),
-        observed_label: readRequiredString(evidenceRaw, "observed_label", FIELD_LIMITS.observed_label, errors),
-        observed_score: readRequiredString(evidenceRaw, "observed_score", FIELD_LIMITS.observed_score, errors),
-        expected_label: readRequiredString(evidenceRaw, "expected_label", FIELD_LIMITS.expected_label, errors),
+        blocked_action: readRequiredString(
+          evidenceRaw,
+          "blocked_action",
+          FIELD_LIMITS.blocked_action,
+          errors,
+        ),
+        expected_task: readRequiredString(evidenceRaw, "expected_task", FIELD_LIMITS.expected_task, errors),
         repeatability: readRequiredString(evidenceRaw, "repeatability", FIELD_LIMITS.repeatability, errors),
-        content_hash: readRequiredString(evidenceRaw, "content_hash", FIELD_LIMITS.content_hash, errors),
+        blocked_url_hash: readRequiredString(
+          evidenceRaw,
+          "blocked_url_hash",
+          FIELD_LIMITS.blocked_url_hash,
+          errors,
+        ),
         sanitized_context: readRequiredString(
           evidenceRaw,
           "sanitized_context",
@@ -274,30 +271,24 @@ export function validateAndBuildFalseNegativeReport(rawParams: unknown): Validat
         ),
       }
     : {
-        detector_id: "",
+        rule_id: "",
         timestamp: "",
-        hook: "",
-        tool_name: "",
-        observed_label: "",
-        observed_score: "",
-        expected_label: "",
+        blocked_action: "",
+        expected_task: "",
         repeatability: "",
-        content_hash: "",
+        blocked_url_hash: "",
         sanitized_context: "",
       };
 
   rejectUnsupportedFixedFields(rawParams, errors);
   validateNoUnsafeContent("event_id", eventId, errors);
   validateNoUnsafeContent("reason", reason, errors);
-  validateNoUnsafeContent("evidence.detector_id", evidence.detector_id, errors);
+  validateNoUnsafeContent("evidence.rule_id", evidence.rule_id, errors);
   validateNoUnsafeContent("evidence.timestamp", evidence.timestamp, errors);
-  validateNoUnsafeContent("evidence.hook", evidence.hook, errors);
-  validateNoUnsafeContent("evidence.tool_name", evidence.tool_name, errors);
-  validateNoUnsafeContent("evidence.observed_label", evidence.observed_label, errors);
-  validateNoUnsafeContent("evidence.observed_score", evidence.observed_score, errors);
-  validateNoUnsafeContent("evidence.expected_label", evidence.expected_label, errors);
+  validateNoUnsafeContent("evidence.blocked_action", evidence.blocked_action, errors);
+  validateNoUnsafeContent("evidence.expected_task", evidence.expected_task, errors);
   validateNoUnsafeContent("evidence.repeatability", evidence.repeatability, errors);
-  validateContentHash(evidence.content_hash, errors);
+  validateContentHash("evidence.blocked_url_hash", evidence.blocked_url_hash, errors);
   validateNoUnsafeContent("evidence.sanitized_context", evidence.sanitized_context, errors);
 
   if (errors.length > 0) {
@@ -309,7 +300,7 @@ export function validateAndBuildFalseNegativeReport(rawParams: unknown): Validat
     payload: {
       event_id: eventId,
       source: "openclaw",
-      label: "suspected_false_negative",
+      label: "suspected_false_positive",
       reason,
       evidence,
       confidence,
@@ -317,14 +308,14 @@ export function validateAndBuildFalseNegativeReport(rawParams: unknown): Validat
   };
 }
 
-export function resolveFalseNegativeReportUrl(configValue: unknown): string | undefined {
+export function resolveFalsePositiveReportUrl(configValue: unknown): string | undefined {
   if (typeof configValue === "string" && configValue.trim().length > 0) {
     return configValue.trim();
   }
 
   if (process.env.FIREWALL_REPORT_LIVE_WEBHOOK === "1") {
     const override = process.env.FIREWALL_REPORT_URL?.trim();
-    return override && override.length > 0 ? override : DEFAULT_FALSE_NEGATIVE_REPORT_URL;
+    return override && override.length > 0 ? override : DEFAULT_FALSE_POSITIVE_REPORT_URL;
   }
 
   return undefined;
@@ -395,9 +386,9 @@ function rejectUnsupportedFixedFields(rawParams: Record<string, unknown>, errors
     errors.push('source is fixed by the tool and must not be supplied as anything other than "openclaw"');
   }
 
-  if ("label" in rawParams && rawParams.label !== "suspected_false_negative") {
+  if ("label" in rawParams && rawParams.label !== "suspected_false_positive") {
     errors.push(
-      'label is fixed by the tool and must not be supplied as anything other than "suspected_false_negative"',
+      'label is fixed by the tool and must not be supplied as anything other than "suspected_false_positive"',
     );
   }
 }
@@ -412,13 +403,13 @@ function validateNoUnsafeContent(path: string, value: string, errors: string[]):
   }
 }
 
-function validateContentHash(value: string, errors: string[]): void {
+function validateContentHash(path: string, value: string, errors: string[]): void {
   for (const { pattern, reason } of SECRET_PATTERNS) {
     if (reason === "email address" || reason === "SSN-like value" || reason === "payment-card-like value") {
       continue;
     }
     if (pattern.test(value)) {
-      errors.push(`evidence.content_hash appears to contain ${reason}`);
+      errors.push(`${path} appears to contain ${reason}`);
     }
   }
 
@@ -426,7 +417,7 @@ function validateContentHash(value: string, errors: string[]): void {
 
   const normalized = value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
   if (!/^[A-Fa-f0-9]{32,128}$/.test(normalized)) {
-    errors.push("evidence.content_hash must be a hash value, not raw content or a raw URL");
+    errors.push(`${path} must be a hash value, not raw content or a raw URL`);
   }
 }
 

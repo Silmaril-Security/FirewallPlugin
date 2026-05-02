@@ -3,6 +3,10 @@
   "name": "Firewall Plugin",
   "description": "Adds a firewall to OpenClaw",
   "skills": ["skills"],
+  "contracts": {
+    "webFetchProviders": ["silmaril-firewall"],
+    "tools": ["web_fetch", "firewall_report_false_positive"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": true,
@@ -10,13 +14,18 @@
       "apiKey": { "type": "string" },
       "silmarilApiKey": { "type": "string" },
       "apiUrl": { "type": "string" },
-      "falsePositiveReportUrl": { "type": "string" }
+      "falsePositiveReportUrl": { "type": "string" },
+      "enableWebFetchWrapper": { "type": "boolean" }
     }
   },
   "uiHints": {
     "apiKey": { "label": "API Key", "sensitive": true },
     "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
     "apiUrl": { "label": "API URL" },
-    "falsePositiveReportUrl": { "label": "False Positive Report URL" }
+    "falsePositiveReportUrl": { "label": "False Positive Report URL" },
+    "enableWebFetchWrapper": {
+      "label": "Enable Web Fetch Wrapper",
+      "help": "Register a plugin-owned web_fetch tool that fetches pages through Silmaril before content reaches the model."
+    }
   }
 }
