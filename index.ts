@@ -3,10 +3,10 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
 import { createFirewallExporter } from "./src/exporter/register-exporter";
 import {
-  FALSE_POSITIVE_TOOL_NAME,
-  createFalsePositiveReportTool,
-  resolveFalsePositiveReportUrl,
-  validateAndBuildFalsePositiveReport,
+  FALSE_NEGATIVE_TOOL_NAME,
+  createFalseNegativeReportTool,
+  resolveFalseNegativeReportUrl,
+  validateAndBuildFalseNegativeReport,
 } from "./src/false-positive-reporting";
 
 export default definePluginEntry({
@@ -17,11 +17,11 @@ export default definePluginEntry({
     const apiKey = api.pluginConfig?.apiKey;
     const silmarilApiKey = api.pluginConfig?.silmarilApiKey ?? apiKey;
     const apiUrl = api.pluginConfig?.apiUrl;
-    const falsePositiveReportUrl = resolveFalsePositiveReportUrl(api.pluginConfig?.falsePositiveReportUrl);
+    const falseNegativeReportUrl = resolveFalseNegativeReportUrl(api.pluginConfig?.falsePositiveReportUrl);
 
     api.registerTool(
-      createFalsePositiveReportTool({
-        reportUrl: falsePositiveReportUrl,
+      createFalseNegativeReportTool({
+        reportUrl: falseNegativeReportUrl,
         logger: api.logger,
       }),
       { optional: true },
@@ -30,29 +30,29 @@ export default definePluginEntry({
     api.on(
       "before_tool_call",
       async (event) => {
-        if (event.toolName !== FALSE_POSITIVE_TOOL_NAME) {
+        if (event.toolName !== FALSE_NEGATIVE_TOOL_NAME) {
           return;
         }
 
-        const validation = validateAndBuildFalsePositiveReport(event.params);
+        const validation = validateAndBuildFalseNegativeReport(event.params);
         if (!validation.ok) {
           return {
             block: true,
-            blockReason: `False-positive candidate report blocked: ${validation.errors.join("; ")}`,
+            blockReason: `False-negative candidate report blocked: ${validation.errors.join("; ")}`,
           };
         }
 
         return {
           requireApproval: {
-            title: "Submit firewall false-positive candidate",
+            title: "Submit firewall false-negative candidate",
             description:
-              "POST a sanitized suspected_false_positive candidate to the configured firewall review queue. This does not create a ground-truth label.",
+              "POST a sanitized suspected_false_negative candidate to the configured firewall review queue. This does not create a ground-truth label.",
             severity: "warning",
             timeoutMs: 60_000,
             timeoutBehavior: "deny",
             pluginId: "firewall-plugin",
             onResolution(decision) {
-              api.logger?.info?.(`firewall-plugin: false-positive report approval resolved as ${decision}`);
+              api.logger?.info?.(`firewall-plugin: false-negative report approval resolved as ${decision}`);
             },
           },
         };
@@ -87,7 +87,7 @@ export default definePluginEntry({
     };
 
     api.on("before_tool_call", async (event) => {
-      if (event.toolName === FALSE_POSITIVE_TOOL_NAME) {
+      if (event.toolName === FALSE_NEGATIVE_TOOL_NAME) {
         return;
       }
 
