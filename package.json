@@ -2,8 +2,14 @@
   "name": "@silmaril/firewall-plugin",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\""
+  },
   "dependencies": {
     "@silmaril-security/sdk": "^0.1.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
   },
   "openclaw": {
     "extensions": [
