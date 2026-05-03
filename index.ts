@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { Firewall, HookLabel } from "@silmaril-security/sdk";
+import { Firewall, HookLabel, type ClassifyOptions } from "@silmaril-security/sdk";
 import { createFirewallExporter } from "./src/exporter/register-exporter";
 import {
   FALSE_POSITIVE_TOOL_NAME,
@@ -20,6 +20,11 @@ import {
 } from "./src/web-fetch-wrapper";
 
 const FIREWALL_SYNC_WORKER_PATH = fileURLToPath(new URL("./scripts/firewall-classify-worker.mjs", import.meta.url));
+  buildBeforePromptBuildMetadata,
+  buildBeforeToolCallMetadata,
+  buildToolResultPersistMetadata,
+  extractToolResultText,
+} from "./metadata.ts";
 
 export default definePluginEntry({
   id: "firewall-plugin",
@@ -115,7 +120,7 @@ export default definePluginEntry({
     const logFirewallInput = (
       hookName: string,
       text: string,
-      options: { hook: HookLabel; toolName?: string },
+      options: ClassifyOptions,
     ) => {
       const toolName = options.toolName ? ` toolName=${options.toolName}` : "";
       console.log(`[firewall] classify input ${hookName} metadata hook=${options.hook}${toolName} textLength=${text.length}`);
@@ -129,12 +134,15 @@ export default definePluginEntry({
         return;
       }
 
+    api.on("before_tool_call", async (event, ctx) => {
       const ts = new Date().toISOString();
       try {
         const text = JSON.stringify(event.params);
-        const options = {
+        const metadata = buildBeforeToolCallMetadata(event, ctx, HookLabel.TOOL_CALL);
+        const options: ClassifyOptions = {
           hook: HookLabel.TOOL_CALL,
           toolName: event.toolName,
+          metadata,
         };
         logFirewallInput("before_tool_call", text, options);
         const result = await firewall.classify(text, options);
@@ -172,12 +180,13 @@ export default definePluginEntry({
     api.on("tool_result_persist", (event, _ctx) => {
       const ts = new Date().toISOString();
       try {
-        const resultText = event?.message?.content
-          ?.map((c: { text?: string }) => c.text ?? "")
-          .join("\n") ?? "";
-        const options = {
+        const resultText = extractToolResultText(event);
+        const toolName = event.toolName ?? ctx?.toolName;
+        const metadata = buildToolResultPersistMetadata(event, ctx, HookLabel.TOOL_RESPONSE);
+        const options: ClassifyOptions = {
           hook: HookLabel.TOOL_RESPONSE,
-          toolName: event.toolName,
+          toolName,
+          metadata,
         };
         logFirewallInput("tool_result_persist", resultText, options);
         console.log(`[firewall] tool_result_persist sync classify begin`);
@@ -192,7 +201,7 @@ export default definePluginEntry({
         exporter.writeEvent({
             source: "tool_response",
             ts,
-            toolName: event.toolName,
+            toolName,
             payload: {
               text: resultText,
             },
@@ -245,8 +254,10 @@ export default definePluginEntry({
 
       try {
         if (text) {
-          const options = {
+          const metadata = buildBeforePromptBuildMetadata(event, ctx, HookLabel.USER_INPUT);
+          const options: ClassifyOptions = {
             hook: HookLabel.USER_INPUT,
+            metadata,
           };
           logFirewallInput("before_prompt_build", text, options);
           const result = await firewall.classify(text, options);
