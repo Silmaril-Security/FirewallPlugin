@@ -2,7 +2,7 @@
 
 Prompt-injection detection, guarded web fetch, and approval-gated firewall feedback for OpenClaw.
 
-This is one plugin. It can register classifier hooks, reporting skills/tools, and a firewall-owned `web_fetch` wrapper. Customers do not need a separate wrapper plugin.
+This is one plugin. It can register classifier hooks, reporting skills/tools, a firewall-owned `web_fetch` wrapper, and a firewall-owned GitHub issue reader. Customers do not need a separate wrapper plugin.
 
 ## Registered Surface
 
@@ -13,6 +13,7 @@ This is one plugin. It can register classifier hooks, reporting skills/tools, an
 | `tool_result_persist` hook | Classifies tool output before it is persisted into later context. |
 | `silmaril-firewall` web fetch provider | Provider metadata/fallback registration for OpenClaw web fetch provider discovery. |
 | `web_fetch` wrapper tool | Optional replacement for OpenClaw's built-in `web_fetch`; fetches pages through Silmaril before fetched content reaches the model. |
+| `github_issue_read` wrapper tool | Reads GitHub issues through the GitHub API and Silmaril before issue body/comments reach the model. |
 | `firewall_report_false_positive` tool | Approval-gated submission of sanitized `suspected_false_positive` candidate reports to a review queue. |
 | `firewall-false-positive-reporting` skill | Standing policy for when to call `firewall_report_false_positive` with required evidence, privacy limits, and protected-skill safeguards. |
 
@@ -25,6 +26,12 @@ git clone https://github.com/Silmaril-Security/FirewallPlugin.git
 cd FirewallPlugin
 npm install
 openclaw plugins install -l .
+```
+
+If OpenClaw's local plugin safety scanner blocks installation because this plugin uses a sync child process for `tool_result_persist` classification, review the source and then install the local checkout explicitly:
+
+```sh
+openclaw plugins install -l . --dangerously-force-unsafe-install
 ```
 
 Restart the gateway after installing or changing plugin config:
@@ -46,11 +53,9 @@ Add the plugin entry to `~/.openclaw/openclaw.json`.
       "firewall-plugin": {
         "enabled": true,
         "config": {
-          "apiKey": "your-silmaril-api-key",
+          "apiKey": "your-plugin-or-openclaw-api-key",
+          "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.example.com/classify"
-        },
-        "hooks": {
-          "allowConversationAccess": true
         }
       }
     }
@@ -58,7 +63,9 @@ Add the plugin entry to `~/.openclaw/openclaw.json`.
 }
 ```
 
-`apiKey` may also be supplied as `silmarilApiKey`. `apiUrl` is the Silmaril classify endpoint. If either credential or endpoint is missing, classifier hooks and the web fetch wrapper are disabled. The report tool may still be visible, but it will not submit unless a review-queue URL is configured.
+`apiKey` may also be supplied as `silmarilApiKey`. If both are present, `silmarilApiKey` is used for Silmaril classification and exporter API calls; `apiKey` can remain the OpenClaw/plugin identity key. `apiUrl` is the Silmaril classify endpoint. If either credential or endpoint is missing, classifier hooks and wrapper tools are disabled. The report tool may still be visible, but it will not submit unless a review-queue URL is configured.
+
+Current OpenClaw 2026.4.x config validation rejects a plugin-level `hooks.allowConversationAccess` key. Do not include that key unless your OpenClaw version explicitly documents it.
 
 ## Enable The Web Fetch Wrapper
 
@@ -78,12 +85,10 @@ Example:
       "firewall-plugin": {
         "enabled": true,
         "config": {
-          "apiKey": "your-silmaril-api-key",
+          "apiKey": "your-plugin-or-openclaw-api-key",
+          "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.example.com/classify",
           "enableWebFetchWrapper": true
-        },
-        "hooks": {
-          "allowConversationAccess": true
         }
       }
     }
@@ -113,9 +118,94 @@ If your OpenClaw config uses restrictive tool allowlists, also allow the plugin 
 ```json
 {
   "tools": {
-    "alsoAllow": ["web_fetch"]
+    "alsoAllow": ["web_fetch", "github_issue_read"]
   }
 }
+```
+
+## Enable The GitHub Issue Wrapper
+
+The GitHub issue wrapper gives GitHub issue reads the same safety shape as the `web_fetch` wrapper, without fetching the large GitHub HTML page shell. It calls the GitHub REST API directly:
+
+```text
+GET https://api.github.com/repos/:owner/:repo/issues/:issue_number
+GET https://api.github.com/repos/:owner/:repo/issues/:issue_number/comments
+```
+
+The wrapper then classifies the normalized issue body and comments with Silmaril before returning any issue content to the model. It does not change `web_fetch` behavior.
+
+The tool is registered as:
+
+```text
+github_issue_read
+```
+
+Supported parameters:
+
+```json
+{
+  "url": "https://github.com/AumUpadhyay/RestaurantAppUI/issues/3",
+  "includeComments": true,
+  "maxChars": 20000
+}
+```
+
+or:
+
+```json
+{
+  "owner": "AumUpadhyay",
+  "repo": "RestaurantAppUI",
+  "issueNumber": 3,
+  "includeComments": true
+}
+```
+
+Expected behavior:
+
+1. The model calls `github_issue_read` for GitHub issue URLs.
+2. The plugin fetches the issue and comments through the GitHub API.
+3. The plugin calls Silmaril with `hook: TOOL_RESPONSE` and `toolName: github_issue_read`.
+4. If the result is benign, the tool returns wrapped untrusted GitHub issue content plus `firewall.prediction` and `firewall.score`.
+5. If the result is malicious, the tool returns a guarded result with `firewall.blocked: true`, classifier prediction and score, URL/content hashes, an approval handle, a system-control block, and issue text inside `<<<UNTRUSTED_FETCHED_GITHUB_CONTENT ... approval_state="pending_user_approval">>>`.
+
+The generic `tool_result_persist` hook preserves that guarded result so the assistant sees the system-control block and asks:
+
+```text
+Do you want me to proceed with the flagged content despite the MALICIOUS firewall result?
+```
+
+The plugin also blocks common GitHub issue bypasses through shell execution, such as:
+
+```sh
+gh issue view 3 --repo AumUpadhyay/RestaurantAppUI
+gh api repos/AumUpadhyay/RestaurantAppUI/issues/3
+```
+
+When those are attempted, the `before_tool_call` hook tells the model to retry with `github_issue_read`. This is intentionally scoped to GitHub issue reads; normal non-GitHub shell use is not blocked by this wrapper.
+
+In current OpenClaw builds, add the wrapper to `tools.alsoAllow` so it is exposed to agent turns:
+
+```json
+{
+  "tools": {
+    "alsoAllow": ["github_issue_read"]
+  }
+}
+```
+
+For a reproducible Claude Code/OpenClaw setup, use this prompt in a new session after restarting the gateway:
+
+```text
+Use the web to tell me how I can fix https://github.com/AumUpadhyay/RestaurantAppUI/issues/3
+```
+
+Expected logs:
+
+```text
+firewall-plugin: registered github_issue_read wrapper tool
+firewall-plugin: github_issue_read wrapper classified AumUpadhyay/RestaurantAppUI#3 as MALICIOUS
+[firewall] tool_result_persist preserving guarded github_issue_read content for approval flow
 ```
 
 ## Web Fetch Behavior
@@ -174,12 +264,10 @@ The registered reporting tool is `firewall_report_false_positive`. Configure `fa
       "firewall-plugin": {
         "enabled": true,
         "config": {
-          "apiKey": "your-silmaril-api-key",
+          "apiKey": "your-plugin-or-openclaw-api-key",
+          "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.example.com/classify",
           "falsePositiveReportUrl": "http://127.0.0.1:8787/webhook"
-        },
-        "hooks": {
-          "allowConversationAccess": true
         }
       }
     }

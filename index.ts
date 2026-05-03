@@ -19,6 +19,13 @@ import {
   readOpenClawWebFetchConfig,
 } from "./src/web-fetch-wrapper";
 import {
+  FIREWALL_GITHUB_ISSUE_TOOL_NAME,
+  buildGitHubIssueReadBypassBlockReason,
+  createFirewallGitHubIssueTool,
+  isFirewallGitHubIssueGuardedResultText,
+  isGitHubIssueReadBypass,
+} from "./src/github-issue-wrapper";
+import {
   buildBeforePromptBuildMetadata,
   buildBeforeToolCallMetadata,
   buildToolResultPersistMetadata,
@@ -112,6 +119,16 @@ export default definePluginEntry({
       api.logger.info(`firewall-plugin: registered ${FIREWALL_WEB_FETCH_PROVIDER_ID} web_fetch wrapper tool`);
     }
 
+    api.registerTool(
+      () =>
+        createFirewallGitHubIssueTool({
+          firewall,
+          logger: api.logger,
+        }),
+      { name: FIREWALL_GITHUB_ISSUE_TOOL_NAME },
+    );
+    api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_ISSUE_TOOL_NAME} wrapper tool`);
+
     const logExporterWarning = (hook: string, err: unknown) => {
       const message = `[firewall] exporter write failed in ${hook}: ${err instanceof Error ? err.message : String(err)}`;
       api.logger?.warn?.(message);
@@ -172,6 +189,16 @@ export default definePluginEntry({
             }),
           };
         }
+
+        if (isGitHubIssueReadBypass(event.toolName, event.params)) {
+          return {
+            block: true,
+            blockReason: buildGitHubIssueReadBypassBlockReason({
+              toolName: event.toolName,
+              timestamp: ts,
+            }),
+          };
+        }
       } catch (err) {
         console.error(`[firewall] before_tool_call error:`, err);
       }
@@ -210,8 +237,11 @@ export default definePluginEntry({
           .catch((err) => logExporterWarning("tool_result_persist", err));
 
         if (isFirewallMalicious(result.prediction)) {
-          if (event.toolName === "web_fetch" && isFirewallWebFetchGuardedResultText(resultText)) {
-            console.log("[firewall] tool_result_persist preserving guarded web_fetch content for approval flow");
+          if (
+            isFirewallWebFetchGuardedResultText(resultText) ||
+            isFirewallGitHubIssueGuardedResultText(resultText)
+          ) {
+            console.log(`[firewall] tool_result_persist preserving guarded ${event.toolName} content for approval flow`);
             return;
           }
 
