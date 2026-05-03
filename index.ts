@@ -18,13 +18,14 @@ import {
   isFirewallWebFetchGuardedResultText,
   readOpenClawWebFetchConfig,
 } from "./src/web-fetch-wrapper";
-
-const FIREWALL_SYNC_WORKER_PATH = fileURLToPath(new URL("./scripts/firewall-classify-worker.mjs", import.meta.url));
+import {
   buildBeforePromptBuildMetadata,
   buildBeforeToolCallMetadata,
   buildToolResultPersistMetadata,
   extractToolResultText,
 } from "./metadata.ts";
+
+const FIREWALL_SYNC_WORKER_PATH = fileURLToPath(new URL("./scripts/firewall-classify-worker.mjs", import.meta.url));
 
 export default definePluginEntry({
   id: "firewall-plugin",
@@ -129,12 +130,11 @@ export default definePluginEntry({
       console.log(`[firewall] classify input ${hookName} raw text end`);
     };
 
-    api.on("before_tool_call", async (event) => {
+    api.on("before_tool_call", async (event, ctx) => {
       if (event.toolName === FALSE_POSITIVE_TOOL_NAME) {
         return;
       }
 
-    api.on("before_tool_call", async (event, ctx) => {
       const ts = new Date().toISOString();
       try {
         const text = JSON.stringify(event.params);
@@ -177,7 +177,7 @@ export default definePluginEntry({
       }
     });
 
-    api.on("tool_result_persist", (event, _ctx) => {
+    api.on("tool_result_persist", (event, ctx) => {
       const ts = new Date().toISOString();
       try {
         const resultText = extractToolResultText(event);
