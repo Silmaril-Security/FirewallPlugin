@@ -28,11 +28,29 @@ npm install
 openclaw plugins install -l .
 ```
 
-If OpenClaw's local plugin safety scanner blocks installation because this plugin uses a sync child process for `tool_result_persist` classification, review the source and then install the local checkout explicitly:
+OpenClaw's local plugin safety scanner will block this install. Expect output similar to:
+
+```text
+Plugin "firewall-plugin" installation blocked: dangerous code patterns detected:
+  - Shell command execution detected (child_process) (index.ts:<line>)
+  - Environment variable access combined with network send — possible credential harvesting (src/false-positive-reporting.ts:<line>)
+Also not a valid hook pack: Error: package.json missing openclaw.hooks
+```
+
+Both detections are expected for this plugin and are not credential exfiltration:
+
+- **`child_process` in `index.ts`** — the `tool_result_persist` hook must classify content synchronously (it cannot await). The plugin uses `spawnSync(process.execPath, [FIREWALL_SYNC_WORKER_PATH], ...)` to invoke its own bundled Node worker. No shell is invoked and no command arguments are constructed from untrusted input.
+- **Env access + network send in `src/false-positive-reporting.ts`** — the flagged line is a canary toggle: when `FIREWALL_REPORT_LIVE_WEBHOOK=1`, the plugin lets `FIREWALL_REPORT_URL` override the configured `falsePositiveReportUrl` for end-to-end testing. The actual report POST elsewhere in the file submits only sanitized candidate reports (see "Reporting Configuration" below) and runs behind the approval gate. No process env beyond those two opt-in canary variables is read, and credentials are never sent in the report body.
+
+The "not a valid hook pack" line is also expected — this plugin registers hooks through the OpenClaw plugin entrypoint (`openclaw.extensions` in `package.json`), not the legacy `openclaw.hooks` hook-pack format.
+
+Review `index.ts` and `src/false-positive-reporting.ts` against the explanations above, then install with the explicit override flag:
 
 ```sh
 openclaw plugins install -l . --dangerously-force-unsafe-install
 ```
+
+The override flag is required on every reinstall of this plugin from a local checkout. Treat it as a reviewed, one-time approval per upgrade — re-read the diff in those two files before re-running it after pulling new commits.
 
 Restart the gateway after installing or changing plugin config:
 
