@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "manual:fp:webhook": "node scripts/manual-fp-webhook.mjs serve",
+    "manual:fp:captures": "node scripts/manual-fp-webhook.mjs captures",
+    "manual:fp:clear": "node scripts/manual-fp-webhook.mjs clear"
     "test": "node --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\""
   },
   "dependencies": {
