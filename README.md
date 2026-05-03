@@ -62,9 +62,14 @@ Add the plugin entry to `~/.openclaw/openclaw.json`.
 
 ## Enable The Web Fetch Wrapper
 
-The wrapper is the portable way to make normal URL summarization go through Silmaril without patching OpenClaw core.
+The wrapper is the portable way to make normal URL summarization go through Silmaril without patching OpenClaw core. Configure it in the active gateway config, usually `~/.openclaw/openclaw.json`; changing only a repo-local sample file will not affect Telegram or gateway sessions.
 
-To route `web_fetch` through Silmaril, set `enableWebFetchWrapper: true` in the plugin config and disable OpenClaw's built-in web fetch tool:
+To route `web_fetch` through Silmaril, set both of these in the same active config:
+
+- `plugins.entries.firewall-plugin.config.enableWebFetchWrapper: true`
+- `tools.web.fetch.enabled: false`
+
+Example:
 
 ```json
 {
@@ -100,6 +105,8 @@ To route `web_fetch` through Silmaril, set `enableWebFetchWrapper: true` in the 
 Why `enabled: false`: OpenClaw registers the built-in `web_fetch` before plugin tools. If the built-in tool remains enabled, OpenClaw keeps the built-in tool and skips the plugin wrapper because both tools have the same name. The plugin logs a warning when `enableWebFetchWrapper` is true but `tools.web.fetch.enabled` is not false.
 
 The wrapper still reads `maxChars`, `maxResponseBytes`, `timeoutSeconds`, `maxRedirects`, and `userAgent` from `tools.web.fetch`. Disabling the built-in tool does not disable the wrapper.
+
+After changing either setting, restart the gateway and start a new OpenClaw session or channel conversation so the tool snapshot refreshes. For Telegram testing, send the next test message only after the restarted gateway logs `registered silmaril-firewall web_fetch wrapper tool`.
 
 If your OpenClaw config uses restrictive tool allowlists, also allow the plugin tool:
 
@@ -226,6 +233,7 @@ Expected malicious behavior:
 
 - The wrapper fetches and classifies the page once.
 - The plugin logs `web_fetch wrapper classified ... as MALICIOUS`.
+- The tool result has `extractor: "silmaril-firewall"`, `extractMode: "blocked"`, `firewall.blocked: true`, and a `firewall.approvalHandle`.
 - The raw HTTP response/HTML is withheld, but extracted page text is included in the guarded untrusted-content block.
 - The plugin logs `tool_result_persist preserving guarded web_fetch content for approval flow`.
 - The model tells the user that Silmaril marked the fetched page as malicious and asks whether to proceed.
@@ -245,6 +253,8 @@ Expected approval behavior:
 If the model fetches again after approval, check that you are running the current plugin code and that the gateway log includes `tool_result_persist preserving guarded web_fetch content for approval flow` on the first malicious fetch.
 
 If you see a log message warning that `enableWebFetchWrapper` is true but `tools.web.fetch.enabled` is not false, the built-in web fetch tool is still enabled. Set `tools.web.fetch.enabled` to `false`, restart the gateway, and start a new session.
+
+If a malicious page is classified by `tool_result_persist` but the assistant still summarizes without asking for approval, inspect the live tool result. `extractor: "readability"` or `extractor: "raw-html"` with no `firewall.approvalHandle` means OpenClaw used the built-in `web_fetch` instead of the Silmaril wrapper. Re-check the two required config settings above and restart the gateway.
 
 ## Manual Report Queue Helpers
 
