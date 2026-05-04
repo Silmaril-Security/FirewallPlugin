@@ -1,0 +1,34 @@
+{
+  "type": "json",
+  "json": {
+    "url": "https://example.com/report?[redacted]",
+    "finalUrl": "https://example.com/report?[redacted]",
+    "status": 200,
+    "contentType": "text/html",
+    "title": "<<<UNTRUSTED_WEB_CONTENT source=\"web_fetch\">>>\nQuarterly report\n<<<END_UNTRUSTED_WEB_CONTENT source=\"web_fetch\">>>",
+    "extractMode": "markdown",
+    "extractor": "basic-html",
+    "externalContent": {
+      "untrusted": true,
+      "source": "web_fetch",
+      "wrapped": true,
+      "firewallProvider": "silmaril-firewall"
+    },
+    "firewall": {
+      "inspected": true,
+      "prediction": "BENIGN",
+      "score": 0.12,
+      "hook": "tool_response",
+      "toolName": "web_fetch",
+      "contentHash": "877fd7269eb9506dd5af892ababcb7eb5f0b3d1f3468373baf1a27f2b98a64d3",
+      "urlHash": "d9dcaaa373346dbd20dccd3275bc0aac7d5cb377d9543b31b722cf2cff9669d1"
+    },
+    "truncated": false,
+    "length": 161,
+    "rawLength": 63,
+    "wrappedLength": 161,
+    "fetchedAt": "2026-05-03T00:00:00.000Z",
+    "tookMs": 0,
+    "text": "<<<UNTRUSTED_WEB_CONTENT source=\"web_fetch\">>>\nQuarterly report Quarterly vendor report\nRevenue increased 12%.\n<<<END_UNTRUSTED_WEB_CONTENT source=\"web_fetch\">>>"
+  }
+}

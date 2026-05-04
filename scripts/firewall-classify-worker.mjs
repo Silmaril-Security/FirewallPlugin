@@ -18,11 +18,13 @@ try {
   const text = assertString(input.text, "text");
   const hook = assertString(input.hook, "hook");
   const toolName = typeof input.toolName === "string" && input.toolName.trim() ? input.toolName : undefined;
+  const metadata = isRecord(input.metadata) ? input.metadata : undefined;
 
   const firewall = new Firewall({ apiKey, apiUrl });
   const result = await firewall.classify(text, {
     hook,
     ...(toolName ? { toolName } : {}),
+    ...(metadata ? { metadata } : {}),
   });
 
   process.stdout.write(JSON.stringify({
@@ -39,4 +41,8 @@ function assertString(value, field) {
     throw new Error(`Expected ${field} to be a string`);
   }
   return value;
+}
+
+function isRecord(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }

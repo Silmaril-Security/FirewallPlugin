@@ -74,6 +74,7 @@ export type FirewallExportEvent = {
   ts: string;
   eventId?: string;
   apiKeyPathId: string;
+  userEmail?: string;
   host: string;
   source: ExportSource;
   hookName?: PluginHookName;
@@ -145,6 +146,7 @@ export type ExporterPaths = {
 export type ExporterRuntime = {
   apiKey: string;
   apiKeyPathId: string;
+  userEmail?: string;
   host: string;
   paths: ExporterPaths;
   logger: ExporterLogger;

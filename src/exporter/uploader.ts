@@ -242,6 +242,7 @@ async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease
     },
     body: JSON.stringify({
       host: runtime.host,
+      ...(runtime.userEmail ? { userEmail: runtime.userEmail } : {}),
     }),
   });
 

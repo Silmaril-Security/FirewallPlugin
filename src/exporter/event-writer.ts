@@ -311,6 +311,7 @@ export class EventWriter {
         ts: inputSnapshot.ts ?? new Date().toISOString(),
         ...(inputSnapshot.eventId ? { eventId: inputSnapshot.eventId } : {}),
         apiKeyPathId: this.runtime.apiKeyPathId,
+        ...(this.runtime.userEmail ? { userEmail: this.runtime.userEmail } : {}),
         host: this.runtime.host,
         source: inputSnapshot.source,
         ...(inputSnapshot.hookName ? { hookName: inputSnapshot.hookName } : {}),

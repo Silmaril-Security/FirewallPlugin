@@ -11,26 +11,60 @@ import {
   resolveFalsePositiveReportUrl,
   validateAndBuildFalsePositiveReport,
 } from "./src/false-positive-reporting";
+import { createFalsePositiveReviewStore } from "./src/false-positive-review-store";
+import { parsePluginConfig } from "./src/plugin-config";
+import { createGoogleTokenCache, refreshGoogleAccessToken } from "./src/auth";
 import {
   FIREWALL_WEB_FETCH_PROVIDER_ID,
   createFirewallWebFetchProvider,
   createFirewallWebFetchTool,
-  isFirewallWebFetchGuardedResultText,
   readOpenClawWebFetchConfig,
-} from "./src/web-fetch-wrapper";
+} from "./src/tools/web-fetch";
 import {
   FIREWALL_GITHUB_ISSUE_TOOL_NAME,
-  buildGitHubIssueReadBypassBlockReason,
   createFirewallGitHubIssueTool,
-  isFirewallGitHubIssueGuardedResultText,
-  isGitHubIssueReadBypass,
-} from "./src/github-issue-wrapper";
+} from "./src/tools/github-issue-read";
+import { GUARDED_MARKER_KINDS, isGuardedResultText } from "./src/core";
+import {
+  FIREWALL_GITHUB_DISCUSSION_TOOL_NAME,
+  createFirewallGitHubDiscussionTool,
+} from "./src/tools/github-discussion-read";
+import {
+  FIREWALL_GITHUB_FILE_TOOL_NAME,
+  createFirewallGitHubFileTool,
+} from "./src/tools/github-file-read";
+import {
+  FIREWALL_GITHUB_PR_DIFF_TOOL_NAME,
+  createFirewallGitHubPullRequestDiffTool,
+} from "./src/tools/github-pr-diff-read";
+import {
+  FIREWALL_GITHUB_PR_TOOL_NAME,
+  createFirewallGitHubPullRequestTool,
+} from "./src/tools/github-pr-read";
+import {
+  FIREWALL_GITHUB_RELEASE_TOOL_NAME,
+  createFirewallGitHubReleaseTool,
+} from "./src/tools/github-release-read";
+import {
+  FIREWALL_GMAIL_MESSAGE_TOOL_NAME,
+  createFirewallGmailMessageTool,
+} from "./src/tools/gmail-message-read";
+import {
+  FIREWALL_GMAIL_SEARCH_TOOL_NAME,
+  createFirewallGmailSearchTool,
+} from "./src/tools/gmail-search";
+import {
+  FIREWALL_GMAIL_THREAD_TOOL_NAME,
+  createFirewallGmailThreadTool,
+} from "./src/tools/gmail-thread-read";
+import { EMAIL_BYPASS_PATTERNS, GITHUB_BYPASS_PATTERNS, createBypassRegistry } from "./src/bypass";
 import {
   buildBeforePromptBuildMetadata,
   buildBeforeToolCallMetadata,
   buildToolResultPersistMetadata,
   extractToolResultText,
 } from "./metadata.ts";
+import { resolveUserEmail, withUserEmailClassifyOptions } from "./src/user-email";
 
 const FIREWALL_SYNC_WORKER_PATH = fileURLToPath(new URL("./scripts/firewall-classify-worker.mjs", import.meta.url));
 
@@ -39,10 +73,18 @@ export default definePluginEntry({
   name: "Firewall Plugin",
   description: "Adds a firewall to OpenClaw",
   register(api) {
-    const apiKey = readConfigString(api.pluginConfig?.apiKey);
-    const silmarilApiKey = readConfigString(api.pluginConfig?.silmarilApiKey) ?? apiKey;
-    const apiUrl = readConfigString(api.pluginConfig?.apiUrl);
-    const falsePositiveReportUrl = resolveFalsePositiveReportUrl(api.pluginConfig?.falsePositiveReportUrl);
+    const pluginConfig = parsePluginConfig(api.pluginConfig, api.logger);
+    const apiKey = pluginConfig.apiKey;
+    const silmarilApiKey = pluginConfig.silmarilApiKey;
+    const apiUrl = pluginConfig.apiUrl;
+    const userEmail = resolveUserEmail(pluginConfig.userEmail);
+    const falsePositiveReportUrl = resolveFalsePositiveReportUrl(pluginConfig.falsePositiveReportUrl);
+    const falsePositiveReviewStore = createFalsePositiveReviewStore({
+      apiKey: silmarilApiKey,
+      identifier: userEmail,
+      threshold: pluginConfig.llmFalsePositiveReviewThreshold,
+      logger: api.logger,
+    });
 
     api.registerTool(
       createFalsePositiveReportTool({
@@ -84,22 +126,53 @@ export default definePluginEntry({
       { priority: 1000 },
     );
 
+    api.on(
+      "message_sending",
+      (event) => falsePositiveReviewStore.handleMessageSending(event),
+      { priority: 1000 },
+    );
+
+    api.on(
+      "before_message_write",
+      (event) => {
+        const content = extractAssistantMessageText(event.message);
+        if (content === undefined) {
+          return;
+        }
+
+        const result = falsePositiveReviewStore.handleMessageSending({ content });
+        if (!result?.content || result.content === content) {
+          return;
+        }
+
+        return {
+          message: replaceAssistantMessageText(event.message, result.content),
+        };
+      },
+      { priority: 1000 },
+    );
+
     if (!silmarilApiKey || !apiUrl) {
       api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifier hooks disabled");
       return;
     }
 
-    const firewall = new Firewall({ apiKey: silmarilApiKey, apiUrl });
-    const exporter = createFirewallExporter(api, { apiKey: silmarilApiKey, apiUrl });
+    const firewall = createFirewallClassifier(new Firewall({ apiKey: silmarilApiKey, apiUrl }), userEmail);
+    const exporter = createFirewallExporter(api, { apiKey: silmarilApiKey, apiUrl, userEmail });
+    const bypassRegistry = createBypassRegistry([
+      ...GITHUB_BYPASS_PATTERNS,
+      ...EMAIL_BYPASS_PATTERNS,
+    ]);
 
     api.registerWebFetchProvider(
       createFirewallWebFetchProvider({
         firewall,
         logger: api.logger,
+        falsePositiveReviewStore,
       }),
     );
 
-    if (api.pluginConfig?.enableWebFetchWrapper === true) {
+    if (pluginConfig.enableWebFetchWrapper) {
       const configuredFetch = readOpenClawWebFetchConfig(api.config);
       if (configuredFetch?.enabled !== false) {
         api.logger.warn(
@@ -112,6 +185,7 @@ export default definePluginEntry({
           createFirewallWebFetchTool({
             firewall,
             logger: api.logger,
+            falsePositiveReviewStore,
             fetchConfig: readOpenClawWebFetchConfig(ctx.runtimeConfig ?? ctx.config ?? api.config),
           }),
         { name: "web_fetch" },
@@ -119,15 +193,139 @@ export default definePluginEntry({
       api.logger.info(`firewall-plugin: registered ${FIREWALL_WEB_FETCH_PROVIDER_ID} web_fetch wrapper tool`);
     }
 
-    api.registerTool(
-      () =>
-        createFirewallGitHubIssueTool({
-          firewall,
-          logger: api.logger,
-        }),
-      { name: FIREWALL_GITHUB_ISSUE_TOOL_NAME },
-    );
-    api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_ISSUE_TOOL_NAME} wrapper tool`);
+    if (pluginConfig.enableGitHubWrappers.issue) {
+      api.registerTool(
+        () =>
+          createFirewallGitHubIssueTool({
+            firewall,
+            logger: api.logger,
+            githubToken: pluginConfig.githubToken,
+          }),
+        { name: FIREWALL_GITHUB_ISSUE_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_ISSUE_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGitHubWrappers.pr) {
+      api.registerTool(
+        () =>
+          createFirewallGitHubPullRequestTool({
+            firewall,
+            logger: api.logger,
+            githubToken: pluginConfig.githubToken,
+          }),
+        { name: FIREWALL_GITHUB_PR_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_PR_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGitHubWrappers.prDiff) {
+      api.registerTool(
+        () =>
+          createFirewallGitHubPullRequestDiffTool({
+            firewall,
+            logger: api.logger,
+            githubToken: pluginConfig.githubToken,
+          }),
+        { name: FIREWALL_GITHUB_PR_DIFF_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_PR_DIFF_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGitHubWrappers.file) {
+      api.registerTool(
+        () =>
+          createFirewallGitHubFileTool({
+            firewall,
+            logger: api.logger,
+            githubToken: pluginConfig.githubToken,
+          }),
+        { name: FIREWALL_GITHUB_FILE_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_FILE_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGitHubWrappers.discussion) {
+      api.registerTool(
+        () =>
+          createFirewallGitHubDiscussionTool({
+            firewall,
+            logger: api.logger,
+            githubToken: pluginConfig.githubToken,
+          }),
+        { name: FIREWALL_GITHUB_DISCUSSION_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_DISCUSSION_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGitHubWrappers.release) {
+      api.registerTool(
+        () =>
+          createFirewallGitHubReleaseTool({
+            firewall,
+            logger: api.logger,
+            githubToken: pluginConfig.githubToken,
+          }),
+        { name: FIREWALL_GITHUB_RELEASE_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GITHUB_RELEASE_TOOL_NAME} wrapper tool`);
+    }
+
+    const gmailEnabled =
+      pluginConfig.enableGmailWrappers.message ||
+      pluginConfig.enableGmailWrappers.thread ||
+      pluginConfig.enableGmailWrappers.search;
+    const googleTokenCache = pluginConfig.google
+      ? createGoogleTokenCache({
+          refresh: () =>
+            refreshGoogleAccessToken(pluginConfig.google!, {
+              logger: api.logger,
+            }),
+        })
+      : undefined;
+
+    if (gmailEnabled && !googleTokenCache) {
+      api.logger.warn("firewall-plugin: Gmail wrappers enabled but google.* not configured");
+    }
+
+    if (pluginConfig.enableGmailWrappers.message && googleTokenCache) {
+      api.registerTool(
+        () =>
+          createFirewallGmailMessageTool({
+            firewall,
+            logger: api.logger,
+            tokenCache: googleTokenCache,
+          }),
+        { name: FIREWALL_GMAIL_MESSAGE_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GMAIL_MESSAGE_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGmailWrappers.thread && googleTokenCache) {
+      api.registerTool(
+        () =>
+          createFirewallGmailThreadTool({
+            firewall,
+            logger: api.logger,
+            tokenCache: googleTokenCache,
+          }),
+        { name: FIREWALL_GMAIL_THREAD_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GMAIL_THREAD_TOOL_NAME} wrapper tool`);
+    }
+
+    if (pluginConfig.enableGmailWrappers.search && googleTokenCache) {
+      api.registerTool(
+        () =>
+          createFirewallGmailSearchTool({
+            firewall,
+            logger: api.logger,
+            tokenCache: googleTokenCache,
+          }),
+        { name: FIREWALL_GMAIL_SEARCH_TOOL_NAME },
+      );
+      api.logger.info(`firewall-plugin: registered ${FIREWALL_GMAIL_SEARCH_TOOL_NAME} wrapper tool`);
+    }
 
     const logExporterWarning = (hook: string, err: unknown) => {
       const message = `[firewall] exporter write failed in ${hook}: ${err instanceof Error ? err.message : String(err)}`;
@@ -154,6 +352,14 @@ export default definePluginEntry({
 
       const ts = new Date().toISOString();
       try {
+        const bypassMatch = bypassRegistry.detect(event.toolName, event.params);
+        if (bypassMatch) {
+          return {
+            block: true,
+            blockReason: bypassMatch.blockReason,
+          };
+        }
+
         const text = JSON.stringify(event.params);
         const metadata = buildBeforeToolCallMetadata(event, ctx, HookLabel.TOOL_CALL);
         const options: ClassifyOptions = {
@@ -190,15 +396,6 @@ export default definePluginEntry({
           };
         }
 
-        if (isGitHubIssueReadBypass(event.toolName, event.params)) {
-          return {
-            block: true,
-            blockReason: buildGitHubIssueReadBypassBlockReason({
-              toolName: event.toolName,
-              timestamp: ts,
-            }),
-          };
-        }
       } catch (err) {
         console.error(`[firewall] before_tool_call error:`, err);
       }
@@ -223,6 +420,7 @@ export default definePluginEntry({
           text: resultText,
           hook: options.hook,
           toolName: options.toolName,
+          metadata: withUserEmailClassifyOptions(options, userEmail).metadata,
         });
         console.log(`[firewall] tool_result_persist sync result:`, JSON.stringify(result));
         exporter.writeEvent({
@@ -238,8 +436,7 @@ export default definePluginEntry({
 
         if (isFirewallMalicious(result.prediction)) {
           if (
-            isFirewallWebFetchGuardedResultText(resultText) ||
-            isFirewallGitHubIssueGuardedResultText(resultText)
+            GUARDED_MARKER_KINDS.some((markerKind) => isGuardedResultText(resultText, markerKind))
           ) {
             console.log(`[firewall] tool_result_persist preserving guarded ${event.toolName} content for approval flow`);
             return;
@@ -352,12 +549,67 @@ function readConfigString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function extractAssistantMessageText(message: unknown): string | undefined {
+  if (!isRecord(message) || message.role !== "assistant") {
+    return undefined;
+  }
+
+  const content = message.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+
+  const parts = content
+    .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : undefined))
+    .filter((part): part is string => typeof part === "string");
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function replaceAssistantMessageText(message: unknown, text: string): unknown {
+  if (!isRecord(message)) {
+    return message;
+  }
+
+  if (typeof message.content === "string") {
+    return {
+      ...message,
+      content: text,
+    };
+  }
+
+  return {
+    ...message,
+    content: [
+      {
+        type: "text",
+        text,
+      },
+    ],
+  };
+}
+
+function createFirewallClassifier(firewall: Firewall, userEmail: string | undefined): Pick<Firewall, "classify"> {
+  return {
+    classify(text, options = {}) {
+      return firewall.classify(text, withUserEmailClassifyOptions(options, userEmail));
+    },
+  };
+}
+
 function classifyFirewallSync(params: {
   apiKey: string;
   apiUrl: string;
   text: string;
   hook: HookLabel;
   toolName?: string;
+  metadata?: Record<string, unknown>;
 }): { prediction: string; score: number } {
   const startedAt = Date.now();
   const child = spawnSync(
@@ -370,6 +622,7 @@ function classifyFirewallSync(params: {
         text: params.text,
         hook: params.hook,
         toolName: params.toolName,
+        metadata: params.metadata,
       }),
       encoding: "utf8",
       timeout: 5_000,

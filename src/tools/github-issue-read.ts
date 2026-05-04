@@ -32,6 +32,7 @@ type GitHubIssueWrapperOptions = {
   firewall: FirewallClassifier;
   logger?: Logger;
   fetchImpl?: typeof fetch;
+  githubToken?: string;
 };
 
 type GitHubIssueReference = {
@@ -105,9 +106,36 @@ export function createFirewallGitHubIssueTool(options: GitHubIssueWrapperOptions
       "Read a GitHub issue through Silmaril firewall inspection. Use this for github.com/.../issues/... URLs instead of shell, gh, curl, or generic web fetch.",
     parameters: GITHUB_ISSUE_PARAMETERS,
     async execute(_toolCallId: string, rawParams: Record<string, unknown>) {
-      return jsonResult(await runFirewallGitHubIssueRead({ ...options, rawParams }));
+      return jsonResult(await runFirewallGitHubIssueReadSafe({ ...options, rawParams }));
     },
   };
+}
+
+async function runFirewallGitHubIssueReadSafe(options: GitHubIssueWrapperOptions & {
+  rawParams: Record<string, unknown>;
+}): Promise<Record<string, unknown>> {
+  try {
+    return await runFirewallGitHubIssueRead(options);
+  } catch (err) {
+    options.logger?.warn?.(
+      `firewall-plugin: github_issue_read wrapper failed open with structured error: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return {
+      error: true,
+      source: "github_issue",
+      toolName: FIREWALL_GITHUB_ISSUE_TOOL_NAME,
+      message: err instanceof Error ? err.message : String(err),
+      firewall: {
+        inspected: false,
+        failOpen: true,
+      },
+      text: `github_issue_read failed before firewall inspection: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
 }
 
 export async function runFirewallGitHubIssueRead(options: GitHubIssueWrapperOptions & {
@@ -119,8 +147,8 @@ export async function runFirewallGitHubIssueRead(options: GitHubIssueWrapperOpti
   const fetchImpl = options.fetchImpl ?? fetch;
   const startedAt = Date.now();
 
-  const issue = await fetchGitHubIssue(fetchImpl, reference);
-  const comments = includeComments ? await fetchGitHubIssueComments(fetchImpl, reference) : [];
+  const issue = await fetchGitHubIssue(fetchImpl, reference, options.githubToken);
+  const comments = includeComments ? await fetchGitHubIssueComments(fetchImpl, reference, options.githubToken) : [];
   const issueText = renderGitHubIssueContent({ reference, issue, comments, includeComments });
   const contentHash = sha256(issueText);
   const urlHash = sha256(reference.htmlUrl);
@@ -275,8 +303,12 @@ function validateGitHubPathPart(value: string, label: string): string {
   return trimmed;
 }
 
-async function fetchGitHubIssue(fetchImpl: typeof fetch, reference: GitHubIssueReference): Promise<GitHubIssue> {
-  const raw = await fetchJson(fetchImpl, reference.apiUrl);
+async function fetchGitHubIssue(
+  fetchImpl: typeof fetch,
+  reference: GitHubIssueReference,
+  githubToken?: string,
+): Promise<GitHubIssue> {
+  const raw = await fetchJson(fetchImpl, reference.apiUrl, githubToken);
   if (!isRecord(raw)) {
     throw new Error("GitHub issue API returned an unexpected response");
   }
@@ -296,8 +328,9 @@ async function fetchGitHubIssue(fetchImpl: typeof fetch, reference: GitHubIssueR
 async function fetchGitHubIssueComments(
   fetchImpl: typeof fetch,
   reference: GitHubIssueReference,
+  githubToken?: string,
 ): Promise<GitHubIssueComment[]> {
-  const raw = await fetchJson(fetchImpl, reference.commentsApiUrl);
+  const raw = await fetchJson(fetchImpl, reference.commentsApiUrl, githubToken);
   if (!Array.isArray(raw)) return [];
   return raw
     .filter(isRecord)
@@ -311,13 +344,17 @@ async function fetchGitHubIssueComments(
     }));
 }
 
-async function fetchJson(fetchImpl: typeof fetch, url: string): Promise<unknown> {
+async function fetchJson(fetchImpl: typeof fetch, url: string, githubToken?: string): Promise<unknown> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "silmaril-openclaw-firewall-plugin",
+  };
+  if (githubToken) {
+    headers.Authorization = `Bearer ${githubToken}`;
+  }
   const response = await fetchImpl(url, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "silmaril-openclaw-firewall-plugin",
-    },
+    headers,
   });
   const text = await response.text();
   if (!response.ok) {

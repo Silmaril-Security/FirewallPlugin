@@ -1,0 +1,35 @@
+{
+  "type": "json",
+  "json": {
+    "url": "https://github.com/octocat/Hello-World/issues/1",
+    "apiUrl": "https://api.github.com/repos/octocat/Hello-World/issues/1",
+    "owner": "octocat",
+    "repo": "Hello-World",
+    "issueNumber": 1,
+    "title": "Quarterly issue",
+    "state": "open",
+    "source": "github_issue",
+    "externalContent": {
+      "untrusted": true,
+      "source": "github_issue_read",
+      "wrapped": true,
+      "firewallProvider": "silmaril-firewall"
+    },
+    "firewall": {
+      "inspected": true,
+      "prediction": "BENIGN",
+      "score": 0.12,
+      "hook": "tool_response",
+      "toolName": "github_issue_read",
+      "contentHash": "c3e10db4885d58f976dffc1ca6c58b779b364b2f809d6fd419b2bb63927b2d09",
+      "urlHash": "fe750479987eb555b74833209497e3d4e70aa6c600a314ebdd465847ea88b2ae"
+    },
+    "truncated": false,
+    "length": 465,
+    "rawLength": 351,
+    "wrappedLength": 465,
+    "fetchedAt": "2026-05-03T00:00:00.000Z",
+    "tookMs": 0,
+    "text": "<<<UNTRUSTED_WEB_CONTENT source=\"github_issue_read\">>>\nGitHub issue: octocat/Hello-World#1\nURL: https://github.com/octocat/Hello-World/issues/1\nTitle: Quarterly issue\nState: open\nAuthor: octocat\nCreated: 2026-05-01T00:00:00Z\nUpdated: 2026-05-02T00:00:00Z\n\nIssue body:\nPlease review the report.\n\nComments (1):\n\nComment 10\nAuthor: hubot\nCreated: 2026-05-01T00:00:00Z\nUpdated: 2026-05-01T00:00:00Z\nLooks good.\n<<<END_UNTRUSTED_WEB_CONTENT source=\"github_issue_read\">>>"
+  }
+}

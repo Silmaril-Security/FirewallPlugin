@@ -32,6 +32,7 @@ type PluginApi = {
 type ExporterOptions = {
   apiKey: string;
   apiUrl: string;
+  userEmail?: string;
 };
 
 type ExporterLock = {
@@ -78,6 +79,7 @@ export function createFirewallExporter(api: PluginApi, options: ExporterOptions)
         runtime = {
           apiKey: options.apiKey,
           apiKeyPathId: FIXED_API_KEY_PATH_ID,
+          userEmail: options.userEmail,
           host: safeHost(os.hostname()),
           paths,
           logger,
