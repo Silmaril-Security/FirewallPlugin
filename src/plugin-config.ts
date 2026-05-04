@@ -6,6 +6,7 @@ export type ParsedPluginConfig = {
   apiUrl?: string;
   userEmail?: string;
   falsePositiveReportUrl?: string;
+  falsePositiveReportApiKey?: string;
   enableWebFetchWrapper: boolean;
   llmFalsePositiveReviewThreshold?: number;
   githubToken?: string;
@@ -45,6 +46,7 @@ export function parsePluginConfig(raw: unknown, logger?: Logger): ParsedPluginCo
     apiUrl,
     userEmail: readString(record.userEmail) ?? readString(record.USER_EMAIL),
     falsePositiveReportUrl: readString(record.falsePositiveReportUrl),
+    falsePositiveReportApiKey: readString(record.falsePositiveReportApiKey),
     enableWebFetchWrapper: record.enableWebFetchWrapper === true,
     llmFalsePositiveReviewThreshold: readNumberInRange(record.llmFalsePositiveReviewThreshold, 0, 1),
     githubToken: readString(record.githubToken),

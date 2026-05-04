@@ -83,6 +83,10 @@ export async function withStrictWebToolsEndpoint(request, handler) {
   });
 }
 
+export async function withTrustedWebToolsEndpoint(request, handler) {
+  return withStrictWebToolsEndpoint(request, handler);
+}
+
 export function wrapWebContent(value, source = "web_fetch") {
   return [
     `<<<UNTRUSTED_WEB_CONTENT source="${source}">>>`,

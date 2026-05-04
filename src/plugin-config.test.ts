@@ -6,11 +6,13 @@ test("parsePluginConfig parses minimal valid config", () => {
   const config = parsePluginConfig({
     apiKey: "key",
     apiUrl: "https://api.example",
+    falsePositiveReportApiKey: "report-key",
   });
 
   assert.equal(config.apiKey, "key");
   assert.equal(config.silmarilApiKey, "key");
   assert.equal(config.apiUrl, "https://api.example");
+  assert.equal(config.falsePositiveReportApiKey, "report-key");
   assert.equal(config.enableGitHubWrappers.issue, true);
   assert.equal(config.enableGitHubWrappers.pr, false);
   assert.equal(config.enableGmailWrappers.message, false);

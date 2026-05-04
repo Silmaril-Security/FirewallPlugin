@@ -55,3 +55,26 @@ test("createBypassRegistry uses registration order and first match wins", () => 
 
   assert.equal(registry.detect("bash", { command: "anything" })?.blockReason, "first");
 });
+
+test("createBypassRegistry checks tool availability at detection time", () => {
+  const available = new Set<string>();
+  const registry = createBypassRegistry(
+    [
+      {
+        toolName: "late_tool",
+        label: "late",
+        detect: () => ({ matched: true, details: { value: 1 } }),
+        buildRetryHint: () => "retry late_tool",
+      },
+    ],
+    {
+      isToolAvailable: (toolName) => available.has(toolName),
+    },
+  );
+
+  assert.equal(registry.detect("exec", { command: "blocked" }), undefined);
+
+  available.add("late_tool");
+
+  assert.equal(registry.detect("exec", { command: "blocked" })?.blockReason, "retry late_tool");
+});

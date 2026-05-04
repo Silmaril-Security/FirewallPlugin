@@ -77,7 +77,9 @@ Add the plugin entry to `~/.openclaw/openclaw.json`.
           "apiKey": "your-plugin-or-openclaw-api-key",
           "silmarilApiKey": "your-silmaril-api-key",
           "userEmail": "user@example.com",
-          "apiUrl": "https://your-endpoint.example.com/classify"
+          "apiUrl": "https://your-endpoint.example.com/classify",
+          "falsePositiveReportUrl": "https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/false-positive",
+          "falsePositiveReportApiKey": "your-report-queue-api-key"
         }
       }
     }
@@ -85,7 +87,7 @@ Add the plugin entry to `~/.openclaw/openclaw.json`.
 }
 ```
 
-`apiKey` may also be supplied as `silmarilApiKey`. If both are present, `silmarilApiKey` is used for Silmaril classification and exporter API calls; `apiKey` can remain the OpenClaw/plugin identity key. `apiUrl` is the Silmaril classify endpoint. If either credential or endpoint is missing, classifier hooks and wrapper tools are disabled. The report tool may still be visible, but it will not submit unless a review-queue URL is configured.
+`apiKey` may also be supplied as `silmarilApiKey`. If both are present, `silmarilApiKey` is used for Silmaril classification and exporter API calls; `apiKey` can remain the OpenClaw/plugin identity key. `apiUrl` is the Silmaril classify endpoint. If either credential or endpoint is missing, classifier hooks and wrapper tools are disabled. The report tool may still be visible, but it will not submit unless a review-queue URL is configured. `falsePositiveReportApiKey` is optional; set it when the false-positive review queue uses a different API Gateway key than the classifier API. If omitted, the plugin falls back to `silmarilApiKey`, then `apiKey`.
 
 ### Configure User Email
 
@@ -189,10 +191,12 @@ If your OpenClaw config uses restrictive tool allowlists, also allow the plugin 
 ```json
 {
   "tools": {
-    "alsoAllow": ["web_fetch", "github_issue_read"]
+    "alsoAllow": ["github_issue_read", "firewall_report_false_positive"]
   }
 }
 ```
+
+`web_fetch` usually does not need to be listed in `alsoAllow` because the wrapper reuses OpenClaw's built-in tool name after `tools.web.fetch.enabled` is set to `false`. Custom plugin tools such as `github_issue_read`, Gmail wrappers, and `firewall_report_false_positive` do need to be present in the session tool policy when you want the model to call them.
 
 ## Enable GitHub Wrappers
 
@@ -430,7 +434,7 @@ In the current OpenClaw runtime, provider selection is not enough to guarantee t
 
 Reporting endpoints are optional. Keep them pointed at a review queue, not direct training.
 
-The registered reporting tool is `firewall_report_false_positive`. Configure `falsePositiveReportUrl` with a review-queue endpoint. Do not point it directly at a training pipeline.
+The registered reporting tool is `firewall_report_false_positive`. Configure `falsePositiveReportUrl` with a review-queue endpoint and expose the tool through `tools.alsoAllow`. Do not point it directly at a training pipeline.
 
 ```json
 {
@@ -443,7 +447,8 @@ The registered reporting tool is `firewall_report_false_positive`. Configure `fa
           "silmarilApiKey": "your-silmaril-api-key",
           "userEmail": "user@example.com",
           "apiUrl": "https://your-endpoint.example.com/classify",
-          "falsePositiveReportUrl": "http://127.0.0.1:8787/webhook"
+          "falsePositiveReportUrl": "https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/false-positive",
+          "falsePositiveReportApiKey": "your-report-queue-api-key"
         }
       }
     }
@@ -454,7 +459,33 @@ The registered reporting tool is `firewall_report_false_positive`. Configure `fa
 }
 ```
 
-The `firewall_report_false_positive` tool submits only structured candidate reports with:
+The tool is optional and approval-gated. If `firewall_report_false_positive` is missing from `tools.alsoAllow`, the `firewall-false-positive-reporting` skill can still teach the model how to format a candidate report, but the model cannot submit it.
+
+The AWS review queue expects:
+
+```http
+POST /prod/v1/openclaw/firewall-export/false-positive
+content-type: application/json
+x-api-key: <falsePositiveReportApiKey or silmarilApiKey>
+```
+
+The request body uses:
+
+```json
+{
+  "identifier": "user@example.com",
+  "timestamp": "2026-05-03T23:10:00.000Z",
+  "hook": "TOOL_RESPONSE",
+  "payload": "{\"event_id\":\"...\",\"source\":\"openclaw\",\"label\":\"suspected_false_positive\"}",
+  "metadata": {
+    "submitted_via": "firewall_report_false_positive"
+  }
+}
+```
+
+For local mock webhooks such as `http://127.0.0.1:8787/webhook`, the tool posts the original structured candidate body directly so the manual suite stays easy to inspect.
+
+Candidate reports contain:
 
 - `source: "openclaw"`
 - `label: "suspected_false_positive"`
@@ -465,6 +496,15 @@ The `firewall_report_false_positive` tool submits only structured candidate repo
 The approval gate runs before submission. Denied, timed-out, invalid, or unconfigured submissions send no request.
 
 Candidate reports must not include secrets, credentials, raw private content, customer data, cookies, tokens, authorization headers, raw URLs, or full URLs with query strings.
+
+After changing `tools.alsoAllow` or plugin config, restart OpenClaw and start a new session so the model receives a fresh tool snapshot:
+
+```sh
+openclaw gateway restart
+openclaw agent --message "/tools verbose"
+```
+
+Expected visible tools include `firewall_report_false_positive`, plus any enabled wrapper tools such as `github_issue_read`.
 
 Safe reporting path:
 

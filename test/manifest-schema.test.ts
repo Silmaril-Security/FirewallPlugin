@@ -13,6 +13,7 @@ test("openclaw manifest includes config schema and ui hints for wrapper config",
     "userEmail",
     "apiUrl",
     "falsePositiveReportUrl",
+    "falsePositiveReportApiKey",
     "enableWebFetchWrapper",
     "llmFalsePositiveReviewThreshold",
     "githubToken",
@@ -26,6 +27,7 @@ test("openclaw manifest includes config schema and ui hints for wrapper config",
 
   assert.equal(uiHints.apiKey.sensitive, true);
   assert.equal(uiHints.silmarilApiKey.sensitive, true);
+  assert.equal(uiHints.falsePositiveReportApiKey.sensitive, true);
   assert.equal(uiHints.githubToken.sensitive, true);
   assert.equal(uiHints["google.clientSecret"].sensitive, true);
   assert.equal(uiHints["google.refreshToken"].sensitive, true);

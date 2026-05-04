@@ -28,6 +28,7 @@
       "userEmail": { "type": "string" },
       "apiUrl": { "type": "string" },
       "falsePositiveReportUrl": { "type": "string" },
+      "falsePositiveReportApiKey": { "type": "string" },
       "enableWebFetchWrapper": { "type": "boolean" },
       "llmFalsePositiveReviewThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
       "githubToken": { "type": "string" },
@@ -72,6 +73,11 @@
     },
     "apiUrl": { "label": "API URL" },
     "falsePositiveReportUrl": { "label": "False Positive Report URL" },
+    "falsePositiveReportApiKey": {
+      "label": "False Positive Report API Key",
+      "sensitive": true,
+      "help": "Optional x-api-key for the false-positive review queue. If omitted, the plugin falls back to silmarilApiKey/apiKey."
+    },
     "enableWebFetchWrapper": {
       "label": "Enable Web Fetch Wrapper",
       "help": "Register a plugin-owned web_fetch tool that fetches pages through Silmaril before content reaches the model."
