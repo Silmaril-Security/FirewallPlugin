@@ -336,7 +336,7 @@ GitHub paths that are not fully covered unless you enable the matching wrapper i
 
 Other OpenClaw GitHub integrations, MCP servers, browser sessions, cloned local repositories, and ad hoc shell commands can still introduce repository content outside these source wrappers. The plugin's generic hooks still classify prompts, tool arguments, and persisted tool results, but `tool_result_persist` cannot stop raw tool output from reaching the model in the same turn. Use source wrappers for content you need inspected before model exposure.
 
-GitHub wrappers currently use the guarded approval flow directly when Silmaril returns `MALICIOUS`. The secondary LLM false-positive review path is implemented for `web_fetch`; if a GitHub wrapper looks like a false positive, use `firewall_report_false_positive` after the approval gate and include sanitized evidence.
+GitHub wrappers use the same secondary LLM false-positive review path as `web_fetch`. When Silmaril returns `MALICIOUS`, the model must independently classify the untrusted GitHub content. If it does not confirm malicious content above `llmFalsePositiveReviewThreshold`, the plugin strips the bookkeeping marker, lets the model continue with the user's original request, and submits a candidate false-positive report to the review queue.
 
 ## Enable Gmail Wrappers
 
@@ -398,7 +398,7 @@ Gmail wrappers register only when both conditions are true: the wrapper flag is 
 
 The plugin blocks direct Gmail API reads through shell commands only when the matching Gmail wrapper is registered. It then tells the model to retry with `gmail_message_read`, `gmail_thread_read`, or `gmail_search`. If the Gmail wrapper is disabled, missing credentials, or omitted from `tools.alsoAllow`, OpenClaw may still have other ways to read email content that are not source-wrapped by this plugin.
 
-Gmail wrappers currently use the guarded approval flow directly when Silmaril returns `MALICIOUS`. The secondary LLM false-positive review path is implemented for `web_fetch`; if a Gmail result looks like a false positive, use `firewall_report_false_positive` after the approval gate and include sanitized evidence.
+Gmail wrappers use the same secondary LLM false-positive review path as `web_fetch`. When Silmaril returns `MALICIOUS`, the model must independently classify the untrusted Gmail content. If it does not confirm malicious content above `llmFalsePositiveReviewThreshold`, the plugin strips the bookkeeping marker, lets the model continue with the user's original request, and submits a candidate false-positive report to the review queue.
 
 ## Log Exporter
 

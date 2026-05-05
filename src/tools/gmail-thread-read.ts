@@ -75,5 +75,6 @@ export async function runFirewallGmailThreadRead(input: {
     contentNoun: "Gmail thread content",
     maxChars: readNumber(input.rawParams.maxChars, 20_000),
     tookMs: Date.now() - startedAt,
+    falsePositiveReviewStore: input.options.falsePositiveReviewStore,
   });
 }

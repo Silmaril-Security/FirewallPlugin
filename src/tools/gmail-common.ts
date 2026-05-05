@@ -1,5 +1,7 @@
 import { HookLabel } from "@silmaril-security/sdk";
+import type { FirewallFalsePositiveReviewStore } from "../false-positive-review-store";
 import {
+  buildApprovalHandle,
   buildBenignPayload,
   buildGuardedPayload,
   isMaliciousPrediction,
@@ -20,6 +22,7 @@ export type GmailToolOptions = {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   tokenCache: GoogleTokenCache;
+  falsePositiveReviewStore?: FirewallFalsePositiveReviewStore;
 };
 
 export async function fetchGmailJson(path: string, options: GmailToolOptions): Promise<unknown> {
@@ -46,6 +49,7 @@ export async function runInspectedGmailTool(input: {
   contentNoun: string;
   maxChars: number;
   tookMs: number;
+  falsePositiveReviewStore?: FirewallFalsePositiveReviewStore;
 }): Promise<Record<string, unknown>> {
   const contentHash = sha256(input.contentText);
   const firewallResult = await runClassification({
@@ -56,7 +60,13 @@ export async function runInspectedGmailTool(input: {
     logger: input.ctx.logger,
   });
 
-  if (isMaliciousPrediction(firewallResult.prediction)) {
+  const blocked = isMaliciousPrediction(firewallResult.prediction);
+  const approvalHandle = blocked ? buildApprovalHandle(input.ctx.source, contentHash) : undefined;
+  input.ctx.logger?.info?.(
+    `firewall-plugin: primary firewall decision source=${input.ctx.source} toolName=${input.ctx.toolName} hook=${HookLabel.TOOL_RESPONSE} prediction=${firewallResult.prediction} score=${firewallResult.score} contentHash=sha256:${contentHash}${approvalHandle ? ` approvalHandle=${approvalHandle}` : ""}`,
+  );
+
+  if (blocked) {
     return buildGuardedPayload({
       ctx: input.ctx,
       contentText: input.contentText,
@@ -67,6 +77,21 @@ export async function runInspectedGmailTool(input: {
       firewallResult,
       hook: HookLabel.TOOL_RESPONSE,
       tookMs: input.tookMs,
+      falsePositiveReview: input.falsePositiveReviewStore
+        ? {
+            store: input.falsePositiveReviewStore,
+            firewallInput: {
+              text: input.scanText,
+              options: {
+                hook: HookLabel.TOOL_RESPONSE,
+                toolName: input.ctx.toolName,
+              },
+            },
+            metadata: {
+              contentNoun: input.contentNoun,
+            },
+          }
+        : undefined,
       sanitizedReason: `Firewall classified fetched ${input.contentNoun} as MALICIOUS.`,
     });
   }

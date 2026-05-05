@@ -125,6 +125,7 @@ export async function runFirewallGitHubDiscussionRead(input: {
     urlForHash: htmlUrl,
     maxChars: readMaxChars(input.rawParams),
     tookMs: Date.now() - startedAt,
+    falsePositiveReviewStore: input.options.falsePositiveReviewStore,
   });
 }
 

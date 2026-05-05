@@ -232,6 +232,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             githubToken: pluginConfig.githubToken,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GITHUB_ISSUE_TOOL_NAME },
       );
@@ -246,6 +247,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             githubToken: pluginConfig.githubToken,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GITHUB_PR_TOOL_NAME },
       );
@@ -260,6 +262,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             githubToken: pluginConfig.githubToken,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GITHUB_PR_DIFF_TOOL_NAME },
       );
@@ -274,6 +277,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             githubToken: pluginConfig.githubToken,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GITHUB_FILE_TOOL_NAME },
       );
@@ -288,6 +292,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             githubToken: pluginConfig.githubToken,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GITHUB_DISCUSSION_TOOL_NAME },
       );
@@ -302,6 +307,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             githubToken: pluginConfig.githubToken,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GITHUB_RELEASE_TOOL_NAME },
       );
@@ -333,6 +339,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             tokenCache: googleTokenCache,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GMAIL_MESSAGE_TOOL_NAME },
       );
@@ -347,6 +354,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             tokenCache: googleTokenCache,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GMAIL_THREAD_TOOL_NAME },
       );
@@ -361,6 +369,7 @@ export default definePluginEntry({
             firewall,
             logger: api.logger,
             tokenCache: googleTokenCache,
+            falsePositiveReviewStore,
           }),
         { name: FIREWALL_GMAIL_SEARCH_TOOL_NAME },
       );

@@ -99,6 +99,7 @@ export async function runFirewallGitHubReleaseRead(input: {
     urlForHash: htmlUrl,
     maxChars: readMaxChars(input.rawParams),
     tookMs: Date.now() - startedAt,
+    falsePositiveReviewStore: input.options.falsePositiveReviewStore,
   });
 }
 

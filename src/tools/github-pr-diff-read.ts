@@ -87,6 +87,7 @@ export async function runFirewallGitHubPullRequestDiffRead(input: {
     urlForHash: htmlUrl,
     maxChars: readMaxChars(input.rawParams),
     tookMs: Date.now() - startedAt,
+    falsePositiveReviewStore: input.options.falsePositiveReviewStore,
   });
 }
 

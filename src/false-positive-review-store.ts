@@ -1,3 +1,5 @@
+import type { SourceLabel } from "./core/types";
+
 export const FIREWALL_LLM_REVIEW_START_MARKER = "<<<SILMARIL_FIREWALL_LLM_REVIEW>>>" as const;
 export const FIREWALL_LLM_REVIEW_END_MARKER = "<<<END_SILMARIL_FIREWALL_LLM_REVIEW>>>" as const;
 export const FALSE_POSITIVE_REVIEW_ENDPOINT =
@@ -14,7 +16,7 @@ export type Logger = {
 
 export type FirewallFalsePositiveReviewCandidate = {
   approvalHandle: string;
-  source: "web_fetch";
+  source: SourceLabel;
   capturedAt: string;
   firewallInput: {
     text: string;
@@ -151,7 +153,13 @@ export function createFalsePositiveReviewStore(options: StoreOptions): FirewallF
       }
 
       const agreedMalicious = isMaliciousPrediction(parsed.prediction) && parsed.confidence > threshold;
+      options.logger?.info?.(
+        `firewall-plugin: LLM firewall review decision approvalHandle=${parsed.approvalHandle} source=${candidate.source} toolName=${candidate.firewallInput.options.toolName ?? "unknown"} prediction=${parsed.prediction} confidence=${parsed.confidence} threshold=${threshold} agreedMalicious=${agreedMalicious}`,
+      );
       if (!agreedMalicious) {
+        options.logger?.info?.(
+          `firewall-plugin: LLM review treated ${candidate.source} content as false-positive candidate approvalHandle=${parsed.approvalHandle}; marker stripped before user delivery`,
+        );
         reportReviewCandidate({
           apiKey,
           identifier,
@@ -162,6 +170,10 @@ export function createFalsePositiveReviewStore(options: StoreOptions): FirewallF
           logger: options.logger,
           timestamp: now(),
         });
+      } else {
+        options.logger?.info?.(
+          `firewall-plugin: LLM review confirmed malicious content approvalHandle=${parsed.approvalHandle}; marker stripped before user delivery`,
+        );
       }
 
       rememberSanitizedContent(sanitizedByOriginalContent, event.content, strippedContent);

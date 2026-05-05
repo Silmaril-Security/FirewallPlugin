@@ -1,6 +1,8 @@
 import { HookLabel } from "@silmaril-security/sdk";
 import { truncateText } from "openclaw/plugin-sdk/provider-web-fetch";
+import type { FirewallFalsePositiveReviewStore } from "../false-positive-review-store";
 import {
+  buildApprovalHandle,
   buildBenignPayload,
   buildGuardedPayload,
   isMaliciousPrediction,
@@ -21,6 +23,7 @@ export type GitHubToolOptions = {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   githubToken?: string;
+  falsePositiveReviewStore?: FirewallFalsePositiveReviewStore;
 };
 
 export type GitHubToolRef = {
@@ -38,6 +41,7 @@ export async function runInspectedGitHubTool(input: {
   urlForHash?: string;
   maxChars: number;
   tookMs: number;
+  falsePositiveReviewStore?: FirewallFalsePositiveReviewStore;
 }): Promise<Record<string, unknown>> {
   const contentHash = sha256(input.contentText);
   const urlHash = input.urlForHash ? sha256(input.urlForHash) : undefined;
@@ -53,7 +57,13 @@ export async function runInspectedGitHubTool(input: {
     `firewall-plugin: ${input.ctx.toolName} wrapper classified content as ${firewallResult.prediction}`,
   );
 
-  if (isMaliciousPrediction(firewallResult.prediction)) {
+  const blocked = isMaliciousPrediction(firewallResult.prediction);
+  const approvalHandle = blocked ? buildApprovalHandle(input.ctx.source, contentHash) : undefined;
+  input.ctx.logger?.info?.(
+    `firewall-plugin: primary firewall decision source=${input.ctx.source} toolName=${input.ctx.toolName} hook=${HookLabel.TOOL_RESPONSE} prediction=${firewallResult.prediction} score=${firewallResult.score} contentHash=sha256:${contentHash}${urlHash ? ` urlHash=sha256:${urlHash}` : ""}${approvalHandle ? ` approvalHandle=${approvalHandle}` : ""}`,
+  );
+
+  if (blocked) {
     return buildGuardedPayload({
       ctx: input.ctx,
       contentText: input.contentText,
@@ -65,6 +75,22 @@ export async function runInspectedGitHubTool(input: {
       firewallResult,
       hook: HookLabel.TOOL_RESPONSE,
       tookMs: input.tookMs,
+      falsePositiveReview: input.falsePositiveReviewStore
+        ? {
+            store: input.falsePositiveReviewStore,
+            firewallInput: {
+              text: input.scanText,
+              options: {
+                hook: HookLabel.TOOL_RESPONSE,
+                toolName: input.ctx.toolName,
+              },
+            },
+            metadata: {
+              contentNoun: input.contentNoun,
+              ...(urlHash ? { urlHash } : {}),
+            },
+          }
+        : undefined,
       sanitizedReason: `Firewall classified fetched ${input.contentNoun} as MALICIOUS.`,
     });
   }

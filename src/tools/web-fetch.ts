@@ -241,7 +241,13 @@ async function runFirewallWebFetch(options: WebFetchRunOptions & {
     `firewall-plugin: web_fetch wrapper classified ${safeUrlHost(url)} as ${firewallResult.prediction}`,
   );
 
-  if (isMaliciousPrediction(firewallResult.prediction)) {
+  const blocked = isMaliciousPrediction(firewallResult.prediction);
+  const approvalHandle = blocked ? `silmaril-web-fetch-${contentHash.slice(0, 16)}` : undefined;
+  options.logger?.info?.(
+    `firewall-plugin: primary firewall decision source=web_fetch toolName=web_fetch targetHost=${safeUrlHost(url)} hook=${HookLabel.TOOL_RESPONSE} prediction=${firewallResult.prediction} score=${firewallResult.score} contentHash=sha256:${contentHash} urlHash=sha256:${urlHash}${approvalHandle ? ` approvalHandle=${approvalHandle}` : ""}`,
+  );
+
+  if (blocked) {
     return buildBlockedWebFetchPayload({
       requestedUrl: url,
       finalUrl: fetched.finalUrl,

@@ -22,6 +22,31 @@ test("github_issue_read returns guarded malicious content", async () => {
   expectGuardedPayload(result.json as Record<string, unknown>, { source: "github_issue", markerKind: "GITHUB" });
 });
 
+test("github_issue_read includes LLM review marker and registers false-positive candidate", async () => {
+  const candidates: Record<string, unknown>[] = [];
+  const result = await runIssue({
+    prediction: "MALICIOUS",
+    falsePositiveReviewStore: {
+      threshold: 0.6,
+      registerCandidate(candidate) {
+        candidates.push(candidate as unknown as Record<string, unknown>);
+      },
+      handleMessageSending() {
+        return undefined;
+      },
+    },
+  });
+
+  const payload = result.json as Record<string, unknown>;
+  assert.equal(payload.firewall.llmReviewRequired, true);
+  assert.equal(payload.firewall.llmReviewThreshold, 0.6);
+  assert.match(String(payload.text), /<<<SILMARIL_FIREWALL_LLM_REVIEW>>>/);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].source, "github_issue");
+  assert.equal(candidates[0].approvalHandle, payload.firewall.approvalHandle);
+  assert.match(String((candidates[0].firewallInput as any).text), /Please review the report/);
+});
+
 test("github_issue_read returns structured error for 404", async () => {
   const fetchImpl = (async () => new Response("missing", { status: 404, statusText: "Not Found" })) as typeof fetch;
   const result = await createFirewallGitHubIssueTool({
@@ -51,7 +76,10 @@ test("github_issue_read bypass detection blocks direct shell issue reads", () =>
   assert.match(buildGitHubIssueReadBypassBlockReason({ toolName: "exec", timestamp: "now" }), /github_issue_read/);
 });
 
-async function runIssue(params: { prediction: "BENIGN" | "MALICIOUS" }) {
+async function runIssue(params: {
+  prediction: "BENIGN" | "MALICIOUS";
+  falsePositiveReviewStore?: Parameters<typeof createFirewallGitHubIssueTool>[0]["falsePositiveReviewStore"];
+}) {
   return withFixedDate("2026-05-03T00:00:00.000Z", () =>
     createFirewallGitHubIssueTool({
       firewall: createFakeFirewall({
@@ -59,6 +87,7 @@ async function runIssue(params: { prediction: "BENIGN" | "MALICIOUS" }) {
         score: params.prediction === "MALICIOUS" ? 0.9 : 0.1,
       }),
       fetchImpl: createIssueFetch(),
+      falsePositiveReviewStore: params.falsePositiveReviewStore,
     }).execute("1", { url: "https://github.com/octocat/Hello-World/issues/1" }),
   );
 }
