@@ -20,6 +20,31 @@ This is one plugin. It can register classifier hooks, reporting skills/tools, a 
 
 The plugin never creates ground-truth training labels. Reporting tools submit candidate feedback only to a validation/review queue.
 
+## Runtime Tool Visibility
+
+The manifest lists every surface the plugin can provide, but OpenClaw only exposes tools that are registered for the active gateway config and allowed by the active tool policy.
+
+A wrapper is active for a session only when all of these are true:
+
+- its plugin config flag enables it
+- its credentials/prerequisites are complete
+- the gateway was restarted after the config change
+- the OpenClaw session started after the gateway restart
+- custom wrapper tools are present in `tools.alsoAllow` if the OpenClaw profile uses restrictive tool policy
+
+`web_fetch` is the exception because the wrapper reuses OpenClaw's built-in tool name. For that one, disable the built-in web fetch and enable the plugin wrapper as described below.
+
+The bypass registry follows the same rule. It blocks shell/API bypasses only for wrapper tools that have actually registered. This avoids a dead-end where OpenClaw blocks `gh pr view` and tells the model to retry with `github_pr_read` when `github_pr_read` is disabled or unavailable. The tradeoff is intentional: if a wrapper is disabled or not allowed in the session, the matching direct-read bypass is not a complete security control.
+
+After any tool config change, verify the live session rather than relying on the manifest:
+
+```sh
+openclaw gateway restart
+openclaw agent --message "/tools verbose"
+```
+
+Expected visible tools should include every wrapper you intend to use, for example `web_fetch`, `github_issue_read`, `github_pr_read`, `gmail_message_read`, and `firewall_report_false_positive`.
+
 ## Install
 
 ```sh
@@ -186,7 +211,7 @@ The request uses the resolved Silmaril API key (`silmarilApiKey`, falling back t
 
 After changing either setting, restart the gateway and start a new OpenClaw session or channel conversation so the tool snapshot refreshes. For Telegram testing, send the next test message only after the restarted gateway logs `registered silmaril-firewall web_fetch wrapper tool`.
 
-If your OpenClaw config uses restrictive tool allowlists, also allow the plugin tool:
+If your OpenClaw config uses restrictive tool allowlists, also allow any custom plugin tools you need in the same active config:
 
 ```json
 {
@@ -202,7 +227,9 @@ If your OpenClaw config uses restrictive tool allowlists, also allow the plugin 
 
 GitHub wrappers give repository reads the same safety shape as the `web_fetch` wrapper, without fetching the large GitHub HTML page shell. Existing customers keep the current behavior: `github_issue_read` defaults on, and every new GitHub wrapper defaults off until enabled.
 
-Optional config:
+With no `enableGitHubWrappers` block, only `github_issue_read` is enabled by default. That means pull requests, PR diffs, files, discussions, and releases are implemented by the plugin but are not registered in the live OpenClaw session.
+
+For full GitHub read coverage, enable every wrapper you want and expose the matching tool names:
 
 ```json
 {
@@ -216,9 +243,9 @@ Optional config:
             "issue": true,
             "pr": true,
             "prDiff": true,
-            "file": false,
-            "discussion": false,
-            "release": false
+            "file": true,
+            "discussion": true,
+            "release": true
           }
         }
       }
@@ -238,6 +265,8 @@ Optional config:
 ```
 
 `githubToken` is optional for public content but recommended for private repositories and rate limits. Use a fine-grained token scoped to the minimum repositories and permissions required: Contents Read, Pull requests Read, Issues Read, Discussions Read, and Metadata Read. For classic PATs, use `repo` only when needed for private repositories.
+
+If you enable only part of the GitHub wrapper set, only that part is source-wrapped. For example, with the default config OpenClaw can use `github_issue_read`, but `github_pr_read` is not visible and the plugin will not block `gh pr view` with a retry hint to an unavailable tool.
 
 Wrapped tools:
 
@@ -295,7 +324,19 @@ gh pr diff 42 --repo owner/repo
 curl https://raw.githubusercontent.com/owner/repo/main/README.md
 ```
 
-When those are attempted, the `before_tool_call` hook tells the model to retry with the matching wrapper. Patterns require a specific identifier such as an issue number, PR number, file path, discussion number, or release path; broad commands like `gh pr list`, `gh repo view`, and `git log` are not blocked.
+When those are attempted and the matching wrapper is registered, the `before_tool_call` hook tells the model to retry with that wrapper. Patterns require a specific identifier such as an issue number, PR number, file path, discussion number, or release path; broad commands like `gh pr list`, `gh repo view`, and `git log` are not blocked.
+
+GitHub paths that are not fully covered unless you enable the matching wrapper include:
+
+- `gh pr view` and GitHub PR HTML/API URLs: enable `github_pr_read`
+- `gh pr diff`, `.diff`, and `.patch` URLs: enable `github_pr_diff_read`
+- `raw.githubusercontent.com` and repository contents API reads: enable `github_file_read`
+- GitHub Discussions reads: enable `github_discussion_read`
+- GitHub Releases reads: enable `github_release_read`
+
+Other OpenClaw GitHub integrations, MCP servers, browser sessions, cloned local repositories, and ad hoc shell commands can still introduce repository content outside these source wrappers. The plugin's generic hooks still classify prompts, tool arguments, and persisted tool results, but `tool_result_persist` cannot stop raw tool output from reaching the model in the same turn. Use source wrappers for content you need inspected before model exposure.
+
+GitHub wrappers currently use the guarded approval flow directly when Silmaril returns `MALICIOUS`. The secondary LLM false-positive review path is implemented for `web_fetch`; if a GitHub wrapper looks like a false positive, use `firewall_report_false_positive` after the approval gate and include sanitized evidence.
 
 ## Enable Gmail Wrappers
 
@@ -353,7 +394,51 @@ Gmail tools:
 
 Gmail wrapper behavior matches GitHub wrappers: content is decoded, normalized, classified, and then returned as wrapped benign content or guarded malicious content. Multipart MIME decoding prefers text/plain, falls back to HTML text extraction, ignores attachments, and caps forwarded/multipart recursion. Access tokens are cached in memory and concurrent refreshes are deduplicated.
 
-The plugin blocks direct Gmail API reads through shell commands and tells the model to retry with `gmail_message_read`, `gmail_thread_read`, or `gmail_search`.
+Gmail wrappers register only when both conditions are true: the wrapper flag is enabled and `google.clientId`, `google.clientSecret`, and `google.refreshToken` are all configured. If a wrapper is enabled but Google config is incomplete, the gateway logs a warning and that tool is not available in the session.
+
+The plugin blocks direct Gmail API reads through shell commands only when the matching Gmail wrapper is registered. It then tells the model to retry with `gmail_message_read`, `gmail_thread_read`, or `gmail_search`. If the Gmail wrapper is disabled, missing credentials, or omitted from `tools.alsoAllow`, OpenClaw may still have other ways to read email content that are not source-wrapped by this plugin.
+
+Gmail wrappers currently use the guarded approval flow directly when Silmaril returns `MALICIOUS`. The secondary LLM false-positive review path is implemented for `web_fetch`; if a Gmail result looks like a false positive, use `firewall_report_false_positive` after the approval gate and include sanitized evidence.
+
+## Log Exporter
+
+When `silmarilApiKey` and `apiUrl` are configured, the plugin starts a durable firewall log exporter. Exporter failures are fail-open: they are logged locally and do not block OpenClaw prompts, tool calls, wrapper execution, or report submissions.
+
+For the hosted AWS exporter, the upload-lease request is:
+
+```http
+POST https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/upload-lease
+content-type: application/json
+x-api-key: <silmarilApiKey>
+```
+
+```json
+{
+  "host": "local-hostname"
+}
+```
+
+The lease response controls the destination S3 prefix. In the current Silmaril alpha deployment, exported logs land under:
+
+```text
+openclaw-firewall/v1/logs/<tenant-path-id>/yyyy/mm/dd/hh/<uuid>.jsonl.gz
+```
+
+Use the first path segment from your classify API host as a practical tenant/path id check. For example, `https://1of9epawm2.execute-api.us-west-2.amazonaws.com/alpha/classify` corresponds to exported log paths under `openclaw-firewall/v1/logs/1of9epawm2/...`.
+
+Local exporter state lives under:
+
+```text
+~/.openclaw/firewall-plugin/export
+```
+
+Useful verification points:
+
+- `checkpoint.json` should advance `uploadedThroughSeq`
+- `spool/*.ready` should drain after successful upload
+- `logs/exporter.log` should show exporter startup and no current upload-lease failures
+
+If upload leases return `403 Forbidden`, check that the exporter is using the Silmaril/classifier API key as `x-api-key`. The false-positive review queue may use a different key; that key is not necessarily valid for export upload leases.
 
 ## Manual Smoke Checks
 
@@ -383,6 +468,25 @@ firewall-plugin: registered github_issue_read wrapper tool
 firewall-plugin: github_issue_read wrapper classified AumUpadhyay/RestaurantAppUI#3 as MALICIOUS
 [firewall] tool_result_persist preserving guarded github_issue_read content for approval flow
 ```
+
+## E2E Failure Harness
+
+The power-user E2E harness in `test/e2e` runs isolated OpenClaw gateways with mocked Silmaril, false-positive review, S3 export, GitHub/Gmail egress, and optional Telegram delivery. It is designed to catch the kinds of OpenClaw orchestration failures that unit tests miss: disabled wrapper bypasses, stale approval state, false-positive review routing, exporter failure behavior, and model-marker handling.
+
+Run it from the plugin repo:
+
+```sh
+npm run test:e2e
+npm run test:e2e:power-user
+```
+
+The harness expects an OpenClaw checkout, defaulting to `../openclaw-clean`:
+
+```sh
+OPENCLAW_E2E_REPO=../openclaw-clean npm run test:e2e
+```
+
+It creates isolated temp `HOME`, `USERPROFILE`, `OPENCLAW_CONFIG_PATH`, and `OPENCLAW_STATE_DIR` values per scenario and asserts the real `~/.openclaw` tree was not modified. See `test/e2e/README.md` for model-key requirements, failure artifacts, and the scenario list.
 
 ## Web Fetch Behavior
 
