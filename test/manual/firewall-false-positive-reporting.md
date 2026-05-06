@@ -65,7 +65,8 @@ Configure the plugin to use the mock webhook. In `~/.openclaw/openclaw.json`, th
         "config": {
           "apiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-classify-endpoint/classify",
-          "falsePositiveReportUrl": "http://127.0.0.1:8787/webhook"
+          "falsePositiveReportUrl": "http://127.0.0.1:8787/webhook",
+          "falsePositiveReportApiKey": "optional-report-queue-api-key"
         },
         "hooks": {
           "allowConversationAccess": true
@@ -149,7 +150,8 @@ Capture checklist:
 - Body has `event_id: "fw-alert-manual-positive-001"`.
 - Body evidence includes `rule_id`, `timestamp`, `blocked_action`, `expected_task`, `repeatability`, `blocked_url_hash`, and `sanitized_context`.
 - Body does not include raw URLs, query strings, tokens, cookies, API keys, passwords, private keys, customer data, or raw private content.
-- Headers do not include `authorization`, `cookie`, or `x-api-key`.
+- Headers do not include `authorization` or `cookie`.
+- If `falsePositiveReportApiKey`, `silmarilApiKey`, or `apiKey` is configured, the request may include `x-api-key`; verify that key is only sent to a trusted review queue or local mock endpoint.
 
 ## Negative Scenario: Missing Evidence
 
@@ -290,7 +292,8 @@ Then configure:
 
 ```json
 {
-  "falsePositiveReportUrl": "https://j8sqlvv9pi.execute-api.us-west-2.amazonaws.com/prod/webhook"
+  "falsePositiveReportUrl": "https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/false-positive",
+  "falsePositiveReportApiKey": "your-report-queue-api-key"
 }
 ```
 

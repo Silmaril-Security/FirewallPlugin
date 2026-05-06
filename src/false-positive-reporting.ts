@@ -40,7 +40,7 @@ type ValidationResult =
 
 type ToolResultDetails = {
   submitted: boolean;
-  status?: "submitted" | "failed" | "blocked";
+  status?: "submitted" | "duplicate" | "failed" | "blocked";
   endpointHost?: string;
   httpStatus?: number;
   validationErrors?: string[];
@@ -86,7 +86,10 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 
 export function createFalsePositiveReportTool(options: {
   reportUrl?: string;
+  apiKey?: string;
+  identifier?: string;
   logger?: Logger;
+  fetchImpl?: typeof fetch;
 }) {
   return {
     name: FALSE_POSITIVE_TOOL_NAME,
@@ -186,15 +189,39 @@ export function createFalsePositiveReportTool(options: {
         );
       }
 
+      const outboundBody = buildOutboundReportBody({
+        payload: validation.payload,
+        endpoint: endpoint.url,
+        identifier: options.identifier,
+      });
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+      };
+      if (options.apiKey) {
+        headers["x-api-key"] = options.apiKey;
+      }
+
       try {
-        const response = await fetch(endpoint.url.toString(), {
+        const fetchImpl = options.fetchImpl ?? fetch;
+        const response = await fetchImpl(endpoint.url.toString(), {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(validation.payload),
+          headers,
+          body: JSON.stringify(outboundBody),
           redirect: "error",
         });
+        const responseBody = await readJsonResponse(response);
+
+        if (isRecord(responseBody) && responseBody.error === "duplicate_report") {
+          options.logger?.info?.(
+            `firewall-plugin: false-positive candidate already exists at ${endpoint.url.host}`,
+          );
+          return textResult("False-positive candidate was already present in the review queue.", {
+            submitted: true,
+            status: "duplicate",
+            endpointHost: endpoint.url.host,
+            httpStatus: response.status,
+          });
+        }
 
         if (!response.ok) {
           return textResult(
@@ -228,6 +255,50 @@ export function createFalsePositiveReportTool(options: {
       }
     },
   };
+}
+
+function buildOutboundReportBody(params: {
+  payload: FalsePositiveReportPayload;
+  endpoint: URL;
+  identifier?: string;
+}): unknown {
+  if (!isFalsePositiveReviewQueueEndpoint(params.endpoint)) {
+    return params.payload;
+  }
+
+  return {
+    identifier: params.identifier ?? "unknown",
+    timestamp: params.payload.evidence.timestamp,
+    hook: normalizeHookName(params.payload.evidence.rule_id),
+    payload: JSON.stringify(params.payload),
+    metadata: {
+      submitted_via: FALSE_POSITIVE_TOOL_NAME,
+      event_id: params.payload.event_id,
+      source: params.payload.source,
+      label: params.payload.label,
+      reason: params.payload.reason,
+      evidence: params.payload.evidence,
+      confidence: params.payload.confidence,
+    },
+  };
+}
+
+function isFalsePositiveReviewQueueEndpoint(url: URL): boolean {
+  return /\/openclaw\/firewall-export\/false-positive\/?$/.test(url.pathname);
+}
+
+function normalizeHookName(ruleId: string): string {
+  const normalized = ruleId.toLowerCase();
+  if (normalized.includes("tool_response") || normalized.includes("tool response")) {
+    return "TOOL_RESPONSE";
+  }
+  if (normalized.includes("tool_call") || normalized.includes("tool call")) {
+    return "TOOL_CALL";
+  }
+  if (normalized.includes("user_input") || normalized.includes("user input")) {
+    return "USER_INPUT";
+  }
+  return "USER_INPUT";
 }
 
 export function validateAndBuildFalsePositiveReport(rawParams: unknown): ValidationResult {
@@ -431,6 +502,16 @@ function textResult(text: string, details: ToolResultDetails) {
     ],
     details,
   };
+}
+
+async function readJsonResponse(response: Response): Promise<unknown> {
+  const text = await response.text().catch(() => "");
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

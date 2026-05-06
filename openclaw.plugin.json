@@ -5,7 +5,19 @@
   "skills": ["skills"],
   "contracts": {
     "webFetchProviders": ["silmaril-firewall"],
-    "tools": ["web_fetch", "firewall_report_false_positive"]
+    "tools": [
+      "web_fetch",
+      "github_issue_read",
+      "github_pr_read",
+      "github_pr_diff_read",
+      "github_file_read",
+      "github_discussion_read",
+      "github_release_read",
+      "gmail_message_read",
+      "gmail_thread_read",
+      "gmail_search",
+      "firewall_report_false_positive"
+    ]
   },
   "configSchema": {
     "type": "object",
@@ -13,19 +25,119 @@
     "properties": {
       "apiKey": { "type": "string" },
       "silmarilApiKey": { "type": "string" },
+      "userEmail": { "type": "string" },
       "apiUrl": { "type": "string" },
       "falsePositiveReportUrl": { "type": "string" },
-      "enableWebFetchWrapper": { "type": "boolean" }
+      "falsePositiveReportApiKey": { "type": "string" },
+      "enableWebFetchWrapper": { "type": "boolean" },
+      "llmFalsePositiveReviewThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+      "githubToken": { "type": "string" },
+      "google": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "clientId": { "type": "string" },
+          "clientSecret": { "type": "string" },
+          "refreshToken": { "type": "string" }
+        }
+      },
+      "enableGitHubWrappers": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "issue": { "type": "boolean", "default": true },
+          "pr": { "type": "boolean", "default": false },
+          "prDiff": { "type": "boolean", "default": false },
+          "file": { "type": "boolean", "default": false },
+          "discussion": { "type": "boolean", "default": false },
+          "release": { "type": "boolean", "default": false }
+        }
+      },
+      "enableGmailWrappers": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "message": { "type": "boolean", "default": false },
+          "thread": { "type": "boolean", "default": false },
+          "search": { "type": "boolean", "default": false }
+        }
+      }
     }
   },
   "uiHints": {
     "apiKey": { "label": "API Key", "sensitive": true },
     "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
+    "userEmail": {
+      "label": "User Email",
+      "help": "Optional account email sent as classification/export metadata. If omitted, the plugin reads USER_EMAIL from the gateway process environment."
+    },
     "apiUrl": { "label": "API URL" },
     "falsePositiveReportUrl": { "label": "False Positive Report URL" },
+    "falsePositiveReportApiKey": {
+      "label": "False Positive Report API Key",
+      "sensitive": true,
+      "help": "Optional x-api-key for the false-positive review queue. If omitted, the plugin falls back to silmarilApiKey/apiKey."
+    },
     "enableWebFetchWrapper": {
       "label": "Enable Web Fetch Wrapper",
       "help": "Register a plugin-owned web_fetch tool that fetches pages through Silmaril before content reaches the model."
+    },
+    "llmFalsePositiveReviewThreshold": {
+      "label": "LLM False Positive Review Threshold",
+      "help": "When web_fetch content is flagged malicious, the model must independently classify it. Above this malicious confidence threshold, it asks the user for permission; otherwise the plugin submits a best-effort candidate false-positive report to the Silmaril review API."
+    },
+    "githubToken": {
+      "label": "GitHub Token",
+      "sensitive": true,
+      "help": "Optional GitHub token used by GitHub wrapper tools for private or higher-rate reads."
+    },
+    "google": {
+      "label": "Google OAuth Credentials",
+      "help": "OAuth desktop-client credentials and refresh token for Gmail read-only wrappers."
+    },
+    "google.clientId": {
+      "label": "Google OAuth Client ID"
+    },
+    "google.clientSecret": {
+      "label": "Google OAuth Client Secret",
+      "sensitive": true
+    },
+    "google.refreshToken": {
+      "label": "Google OAuth Refresh Token",
+      "sensitive": true
+    },
+    "enableGitHubWrappers": {
+      "label": "Enable GitHub Wrappers"
+    },
+    "enableGitHubWrappers.issue": {
+      "label": "Enable GitHub Issue Wrapper"
+    },
+    "enableGitHubWrappers.pr": {
+      "label": "Enable GitHub Pull Request Wrapper"
+    },
+    "enableGitHubWrappers.prDiff": {
+      "label": "Enable GitHub Pull Request Diff Wrapper"
+    },
+    "enableGitHubWrappers.file": {
+      "label": "Enable GitHub File Wrapper"
+    },
+    "enableGitHubWrappers.discussion": {
+      "label": "Enable GitHub Discussion Wrapper"
+    },
+    "enableGitHubWrappers.release": {
+      "label": "Enable GitHub Release Wrapper"
+    },
+    "enableGmailWrappers": {
+      "label": "Enable Gmail Wrappers"
+    },
+    "enableGmailWrappers.message": {
+      "label": "Enable Gmail Message Wrapper"
+    },
+    "enableGmailWrappers.thread": {
+      "label": "Enable Gmail Thread Wrapper"
+    },
+    "enableGmailWrappers.search": {
+      "label": "Enable Gmail Search Wrapper"
     }
   }
 }

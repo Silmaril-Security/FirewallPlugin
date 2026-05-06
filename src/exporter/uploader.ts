@@ -233,12 +233,12 @@ async function readCachedLease(leasePath: string, logger: ExporterRuntime["logge
   }
 }
 
-async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease> {
+export async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease> {
   const response = await fetch(resolveUploadLeaseUrl(), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${runtime.apiKey}`,
       "Content-Type": "application/json",
+      "x-api-key": runtime.apiKey,
     },
     body: JSON.stringify({
       host: runtime.host,
