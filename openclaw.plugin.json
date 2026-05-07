@@ -30,6 +30,7 @@
       "falsePositiveReportUrl": { "type": "string" },
       "falsePositiveReportApiKey": { "type": "string" },
       "enableWebFetchWrapper": { "type": "boolean" },
+      "rolePolicyEndpoint": { "type": "string" },
       "llmFalsePositiveReviewThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
       "githubToken": { "type": "string" },
       "google": {
@@ -81,6 +82,10 @@
     "enableWebFetchWrapper": {
       "label": "Enable Web Fetch Wrapper",
       "help": "Register a plugin-owned web_fetch tool that fetches pages through Silmaril before content reaches the model."
+    },
+    "rolePolicyEndpoint": {
+      "label": "Role Policy Endpoint",
+      "help": "HTTP endpoint that returns a role-based policy action (warn or block) for the resolved userEmail. Reserved for a future release; the plugin currently uses a hardcoded policy client."
     },
     "llmFalsePositiveReviewThreshold": {
       "label": "LLM False Positive Review Threshold",

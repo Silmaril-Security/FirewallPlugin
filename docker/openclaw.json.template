@@ -1,0 +1,91 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/root/.openclaw/workspace",
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-6"
+      },
+      "compaction": {
+        "mode": "safeguard"
+      }
+    },
+    "list": [
+      { "id": "main" }
+    ]
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "port": 18789,
+    "bind": "0.0.0.0",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": ["github_issue_read", "firewall_report_false_positive"],
+    "web": {
+      "fetch": {
+        "enabled": false
+      }
+    }
+  },
+  "skills": {
+    "install": {
+      "nodeManager": "npm"
+    }
+  },
+  "auth": {
+    "profiles": {
+      "anthropic:manual": {
+        "provider": "anthropic",
+        "mode": "api_key"
+      },
+      "openai:manual": {
+        "provider": "openai",
+        "mode": "api_key"
+      }
+    }
+  },
+  "env": {
+    "vars": {
+      "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+      "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "firewall-plugin": {
+        "enabled": true,
+        "config": {
+          "apiKey": "${SILMARIL_PLUGIN_API_KEY}",
+          "silmarilApiKey": "${SILMARIL_API_KEY}",
+          "apiUrl": "${SILMARIL_CLASSIFY_URL}",
+          "falsePositiveReportUrl": "${SILMARIL_FP_REPORT_URL}",
+          "enableWebFetchWrapper": true,
+          "userEmail": "${OPENCLAW_USER_EMAIL}"
+        }
+      }
+    },
+    "load": {
+      "paths": ["/opt/silmaril-plugin"]
+    },
+    "installs": {
+      "firewall-plugin": {
+        "source": "path",
+        "sourcePath": "/opt/silmaril-plugin",
+        "installPath": "/opt/silmaril-plugin",
+        "version": "1.0.0",
+        "installedAt": "2026-05-07T00:00:00.000Z"
+      }
+    }
+  }
+}

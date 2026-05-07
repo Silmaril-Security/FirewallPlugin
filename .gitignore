@@ -1,2 +1,5 @@
 node_modules/
 .manual/
+.live-smoke/
+.claude/
+e2e-detailed*.log

@@ -1,0 +1,9 @@
+node_modules
+.live-smoke
+.manual
+.git
+.gitignore
+test/manual
+*.log
+**/*.test.ts
+docker/.env

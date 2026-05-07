@@ -66,6 +66,22 @@ import {
   extractToolResultText,
 } from "./metadata.ts";
 import { resolveUserEmail, withUserEmailClassifyOptions } from "./src/user-email";
+import { createHardcodedPolicyClient } from "./src/policy/policy-client";
+import { PolicyCache } from "./src/policy/policy-cache";
+import { SessionLock } from "./src/policy/session-lock";
+import {
+  decide,
+  translateForToolCall,
+  translateForToolResult,
+  translateForPromptBuild,
+} from "./src/policy/policy-engine";
+import {
+  buildSessionBlockReason,
+  buildSessionBlockedToolResultText,
+  buildSessionBlockedToolResultDetails,
+  buildSessionBlockedPromptGuard,
+} from "./src/policy/policy-messages";
+import type { PolicyResponse } from "./src/policy/types";
 
 const FIREWALL_SYNC_WORKER_PATH = fileURLToPath(new URL("./scripts/firewall-classify-worker.mjs", import.meta.url));
 
@@ -79,6 +95,23 @@ export default definePluginEntry({
     const silmarilApiKey = pluginConfig.silmarilApiKey;
     const apiUrl = pluginConfig.apiUrl;
     const userEmail = resolveUserEmail(pluginConfig.userEmail);
+    api.logger.info(`firewall-plugin: identity=${userEmail ?? "<none>"}`);
+
+    const policyClient = createHardcodedPolicyClient();
+    const policyCache = new PolicyCache(policyClient, 5 * 60_000, api.logger);
+    const sessionLock = new SessionLock();
+    const FALLBACK_POLICY: PolicyResponse = { action: "warn", resolved_role: "fallback" };
+
+    policyCache.get(userEmail ?? null).then(
+      (policy) => api.logger.info(`firewall-plugin: policy=${policy.action} role=${policy.resolved_role ?? "unknown"}`),
+      (err) => api.logger.warn(`firewall-plugin: initial policy fetch failed - ${err instanceof Error ? err.message : String(err)}`),
+    );
+
+    function readSessionId(c: { sessionId?: unknown } | undefined): string | undefined {
+      const v = c?.sessionId;
+      return typeof v === "string" && v.length > 0 ? v : undefined;
+    }
+
     const falsePositiveReportUrl = resolveFalsePositiveReportUrl(pluginConfig.falsePositiveReportUrl);
     const falsePositiveReviewStore = createFalsePositiveReviewStore({
       apiKey: silmarilApiKey,
@@ -400,6 +433,25 @@ export default definePluginEntry({
       }
 
       const ts = new Date().toISOString();
+      const sessionId = readSessionId(ctx);
+
+      if (sessionLock.isLocked(sessionId)) {
+        const policy = policyCache.peek(userEmail ?? null) ?? FALLBACK_POLICY;
+        api.logger.info(`firewall-plugin: before_tool_call session_locked sessionId=${sessionId} toolName=${event.toolName}`);
+        return {
+          block: true,
+          blockReason: buildSessionBlockReason({
+            source: "tool_call",
+            toolName: event.toolName,
+            prediction: "LOCKED",
+            score: 0,
+            timestamp: ts,
+            sessionId,
+            resolvedRole: policy.resolved_role,
+          }),
+        };
+      }
+
       try {
         const bypassMatch = bypassRegistry.detect(event.toolName, event.params);
         if (bypassMatch) {
@@ -432,9 +484,18 @@ export default definePluginEntry({
         }
 
         if (isFirewallMalicious(result.prediction)) {
-          return {
-            block: true,
-            blockReason: buildMaliciousFirewallBlockReason({
+          const policy = await policyCache.get(userEmail ?? null);
+          const decision = decide(
+            {
+              policyAction: policy.action,
+              classifyResult: result,
+              sessionId,
+              isApprovalPrompt: false,
+            },
+            sessionLock,
+          );
+          const policyResult = translateForToolCall(decision, {
+            warnDescription: buildMaliciousFirewallBlockReason({
               source: "tool_call",
               toolName: event.toolName,
               prediction: result.prediction,
@@ -442,7 +503,22 @@ export default definePluginEntry({
               sanitizedReason: `Firewall classified the ${event.toolName} tool call as MALICIOUS.`,
               timestamp: ts,
             }),
-          };
+            blockReason: buildSessionBlockReason({
+              source: "tool_call",
+              toolName: event.toolName,
+              prediction: result.prediction,
+              score: result.score,
+              timestamp: ts,
+              sessionId,
+              resolvedRole: policy.resolved_role,
+            }),
+            pluginId: "firewall-plugin",
+            toolName: event.toolName,
+            onApprovalResolution(approval) {
+              api.logger?.info?.(`firewall-plugin: malicious tool-call approval resolved as ${approval} (sessionId=${sessionId ?? "unknown"})`);
+            },
+          });
+          if (policyResult) return policyResult;
         }
 
       } catch (err) {
@@ -452,6 +528,36 @@ export default definePluginEntry({
 
     api.on("tool_result_persist", (event, ctx) => {
       const ts = new Date().toISOString();
+      const sessionId = readSessionId(ctx);
+
+      if (sessionLock.isLocked(sessionId)) {
+        const policy = policyCache.peek(userEmail ?? null) ?? FALLBACK_POLICY;
+        const blockText = buildSessionBlockedToolResultText({
+          toolName: event.toolName,
+          prediction: "LOCKED",
+          score: 0,
+          timestamp: ts,
+          sessionId,
+          resolvedRole: policy.resolved_role,
+        });
+        api.logger.info(`firewall-plugin: tool_result_persist session_locked sessionId=${sessionId} toolName=${event.toolName}`);
+        return {
+          message: {
+            ...event.message,
+            content: [{ type: "text", text: blockText }],
+            details: buildSessionBlockedToolResultDetails({
+              toolName: event.toolName,
+              prediction: "LOCKED",
+              score: 0,
+              timestamp: ts,
+              sessionId,
+              resolvedRole: policy.resolved_role,
+              warningText: blockText,
+            }),
+          },
+        };
+      }
+
       try {
         const resultText = extractToolResultText(event);
         const toolName = event.toolName ?? ctx?.toolName;
@@ -491,31 +597,62 @@ export default definePluginEntry({
             return;
           }
 
-          const warningText = buildMaliciousToolResultPersistText({
+          const policy = policyCache.peek(userEmail ?? null) ?? FALLBACK_POLICY;
+          const decision = decide(
+            {
+              policyAction: policy.action,
+              classifyResult: result,
+              sessionId,
+              isApprovalPrompt: false,
+            },
+            sessionLock,
+          );
+
+          const warnWarningText = buildMaliciousToolResultPersistText({
             toolName: event.toolName,
             prediction: result.prediction,
             score: result.score,
             timestamp: ts,
           });
+          const blockWarningText = buildSessionBlockedToolResultText({
+            toolName: event.toolName,
+            prediction: result.prediction,
+            score: result.score,
+            timestamp: ts,
+            sessionId,
+            resolvedRole: policy.resolved_role,
+          });
 
-          return {
-            message: {
-              ...event.message,
-              content: [
-                {
-                  type: "text",
-                  text: warningText,
-                },
-              ],
-              details: buildMaliciousToolResultPersistDetails({
-                toolName: event.toolName,
-                prediction: result.prediction,
-                score: result.score,
-                timestamp: ts,
-                warningText,
-              }),
-            },
+          const warnMessage = {
+            ...event.message,
+            content: [{ type: "text", text: warnWarningText }],
+            details: buildMaliciousToolResultPersistDetails({
+              toolName: event.toolName,
+              prediction: result.prediction,
+              score: result.score,
+              timestamp: ts,
+              warningText: warnWarningText,
+            }),
           };
+          const blockMessage = {
+            ...event.message,
+            content: [{ type: "text", text: blockWarningText }],
+            details: buildSessionBlockedToolResultDetails({
+              toolName: event.toolName,
+              prediction: result.prediction,
+              score: result.score,
+              timestamp: ts,
+              sessionId,
+              resolvedRole: policy.resolved_role,
+              warningText: blockWarningText,
+            }),
+          };
+
+          const policyResult = translateForToolResult(decision, {
+            warnMessage,
+            blockMessage,
+          });
+          if (policyResult) return policyResult;
         }
       } catch (err) {
         console.error(`[firewall] tool_result_persist error:`, err);
@@ -525,8 +662,23 @@ export default definePluginEntry({
     api.on("before_prompt_build", async (event, ctx) => {
       const ts = new Date().toISOString();
       const text = event?.prompt ?? "";
+      const sessionId = readSessionId(ctx);
       let appendSystemContext: string | undefined;
       let prependContext: string | undefined;
+
+      if (sessionLock.isLocked(sessionId)) {
+        const policy = policyCache.peek(userEmail ?? null) ?? FALLBACK_POLICY;
+        const guard = buildSessionBlockedPromptGuard({
+          prediction: "LOCKED",
+          score: 0,
+          timestamp: ts,
+          sessionId,
+          resolvedRole: policy.resolved_role,
+          prompt: text,
+        });
+        api.logger.info(`firewall-plugin: before_prompt_build session_locked sessionId=${sessionId}`);
+        return { appendSystemContext: guard.appendSystemContext, prependContext: guard.prependContext };
+      }
 
       try {
         if (text) {
@@ -540,14 +692,47 @@ export default definePluginEntry({
           console.log(`[firewall] before_prompt_build (USER_INPUT) result:`, JSON.stringify(result));
 
           if (isFirewallProceedApprovalPrompt(text)) {
-            appendSystemContext = buildFirewallProceedApprovalSystemContext({
-              runId: ctx.runId,
-              prediction: result.prediction,
-              score: result.score,
-              timestamp: ts,
-            });
+            const policy = await policyCache.get(userEmail ?? null);
+            const decision = decide(
+              {
+                policyAction: policy.action,
+                classifyResult: result,
+                sessionId,
+                isApprovalPrompt: true,
+              },
+              sessionLock,
+            );
+            if (decision.kind === "noop") {
+              appendSystemContext = buildFirewallProceedApprovalSystemContext({
+                runId: ctx.runId,
+                prediction: result.prediction,
+                score: result.score,
+                timestamp: ts,
+              });
+            } else if (decision.kind === "block") {
+              const guard = buildSessionBlockedPromptGuard({
+                prediction: result.prediction,
+                score: result.score,
+                timestamp: ts,
+                sessionId,
+                resolvedRole: policy.resolved_role,
+                prompt: text,
+              });
+              appendSystemContext = guard.appendSystemContext;
+              prependContext = guard.prependContext;
+            }
           } else if (isFirewallMalicious(result.prediction)) {
-            const guard = buildMaliciousPromptFirewallGuard({
+            const policy = await policyCache.get(userEmail ?? null);
+            const decision = decide(
+              {
+                policyAction: policy.action,
+                classifyResult: result,
+                sessionId,
+                isApprovalPrompt: false,
+              },
+              sessionLock,
+            );
+            const warnGuard = buildMaliciousPromptFirewallGuard({
               runId: ctx.runId,
               source: "user_input",
               prediction: result.prediction,
@@ -556,8 +741,25 @@ export default definePluginEntry({
               timestamp: ts,
               prompt: text,
             });
-            appendSystemContext = guard.systemContext;
-            prependContext = guard.prependContext;
+            const blockGuard = buildSessionBlockedPromptGuard({
+              prediction: result.prediction,
+              score: result.score,
+              timestamp: ts,
+              sessionId,
+              resolvedRole: policy.resolved_role,
+              prompt: text,
+            });
+            const policyResult = translateForPromptBuild(decision, {
+              warnGuard: {
+                appendSystemContext: warnGuard.appendSystemContext,
+                prependContext: warnGuard.prependContext,
+              },
+              blockGuard,
+            });
+            if (policyResult) {
+              appendSystemContext = policyResult.appendSystemContext;
+              prependContext = policyResult.prependContext;
+            }
           }
 
           try {
@@ -577,6 +779,17 @@ export default definePluginEntry({
         console.error(`[firewall] before_prompt_build error:`, err);
       }
 
+      if (appendSystemContext || prependContext) {
+        const ctxStr = appendSystemContext ?? "";
+        const tag = ctxStr.includes("BLOCK with no override path")
+          ? "block"
+          : ctxStr.includes("user_approved_flagged_content")
+            ? "approval_ack"
+            : ctxStr.includes("pending_user_approval")
+              ? "warn"
+              : "unknown";
+        api.logger.info(`firewall-plugin: before_prompt_build guard=${tag} append=${appendSystemContext?.length ?? 0} prepend=${prependContext?.length ?? 0}`);
+      }
       return appendSystemContext || prependContext ? { appendSystemContext, prependContext } : undefined;
     });
   },
