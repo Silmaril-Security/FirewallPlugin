@@ -11,6 +11,7 @@ param(
     [string] $ContainerName = "silmaril-firewall-test",
     [int]    $HostPort = 18790,
     [string] $AnthropicKeyOverride = "",
+    [string] $FixtureUrl = "",
     [switch] $Detach,
     [switch] $RemoveExisting
 )
@@ -55,6 +56,8 @@ $dockerArgs = @(
     "run",
     "--name", $ContainerName,
     "-p", "${HostPort}:18789",
+    "--add-host=host.docker.internal:host-gateway",
+    "--add-host=fixtures.test:host-gateway",
     "-e", "OPENCLAW_GATEWAY_TOKEN=$gatewayToken",
     "-e", "ANTHROPIC_API_KEY=$anthropicKey",
     "-e", "SILMARIL_API_KEY=$silmarilKey",
@@ -63,7 +66,8 @@ $dockerArgs = @(
     "-e", "SILMARIL_FP_REPORT_URL=$fpReportUrl",
     "-e", "OPENCLAW_USER_EMAIL=$UserEmail"
 )
-if ($openaiKey) { $dockerArgs += @("-e", "OPENAI_API_KEY=$openaiKey") }
+if ($openaiKey)  { $dockerArgs += @("-e", "OPENAI_API_KEY=$openaiKey") }
+if ($FixtureUrl) { $dockerArgs += @("-e", "SILMARIL_FIXTURE_URL=$FixtureUrl") }
 if ($Detach) { $dockerArgs += "-d" }
 $dockerArgs += "silmaril-firewall-openclaw:dev"
 

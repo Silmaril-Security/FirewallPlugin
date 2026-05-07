@@ -26,8 +26,7 @@ export async function getFreePort(): Promise<number> {
   return address.port;
 }
 
-export async function listen(server: http.Server, port = 0): Promise<ServerHandle> {
-  const host = "127.0.0.1";
+export async function listen(server: http.Server, port = 0, host = "127.0.0.1"): Promise<ServerHandle> {
   await new Promise<void>((resolve) => server.listen(port, host, resolve));
   const address = server.address();
   if (!address || typeof address === "string") {

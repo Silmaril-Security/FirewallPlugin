@@ -31,7 +31,7 @@
   },
   "tools": {
     "profile": "coding",
-    "alsoAllow": ["github_issue_read", "firewall_report_false_positive"],
+    "alsoAllow": ["web_fetch", "github_issue_read", "firewall_report_false_positive"],
     "web": {
       "fetch": {
         "enabled": false
@@ -71,6 +71,7 @@
           "apiUrl": "${SILMARIL_CLASSIFY_URL}",
           "falsePositiveReportUrl": "${SILMARIL_FP_REPORT_URL}",
           "enableWebFetchWrapper": true,
+          "webFetch": { "dangerouslyAllowPrivateNetwork": true },
           "userEmail": "${OPENCLAW_USER_EMAIL}"
         }
       }

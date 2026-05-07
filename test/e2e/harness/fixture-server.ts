@@ -34,7 +34,7 @@ export const FIXTURE_CANARIES = {
   secret: "CANARY_API_KEY_20260503_4f143d4c",
 } as const;
 
-export async function startFixtureServer(): Promise<FixtureServer> {
+export async function startFixtureServer(opts: { port?: number; host?: string } = {}): Promise<FixtureServer> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
@@ -81,7 +81,7 @@ export async function startFixtureServer(): Promise<FixtureServer> {
     writeText(res, 200, body, fixtureHeaders(fixtureId));
   });
 
-  const handle = await listen(server);
+  const handle = await listen(server, opts.port ?? 0, opts.host ?? "127.0.0.1");
   return {
     ...handle,
     url(id, query = "") {

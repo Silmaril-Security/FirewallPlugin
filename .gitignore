@@ -3,3 +3,4 @@ node_modules/
 .live-smoke/
 .claude/
 e2e-detailed*.log
+e2e-identity*.log
