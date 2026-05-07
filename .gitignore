@@ -1,2 +1,4 @@
 node_modules/
 .manual/
+.pnpm-store/
+docker/e2e-exporter*.log

@@ -4,27 +4,28 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { readFile, rm } from "node:fs/promises";
 import {
+  BATCH_MAX_BYTES,
+  BATCH_MAX_EVENTS,
   EXPORT_BUCKET,
   EXPORT_LOGS_PREFIX,
   LEASE_MAX_AGE_MS,
   LEASE_REFRESH_THRESHOLD_MS,
-  RECENT_UPLOAD_LIMIT,
   UPLOAD_LEASE_URL,
   UPLOAD_LOOP_INTERVAL_MS,
 } from "./types";
 import type { ExporterRuntime, UploadLease } from "./types";
 import {
-  CheckpointStore,
-  EventWriter,
-  chunkId,
-  listReadyChunks,
-  readJsonlSegmentMeta,
+  buildJsonl,
+  claimBatch,
+  commitBatch,
+  releaseBatch,
   writeJsonAtomic,
-} from "./event-writer";
+} from "./simple-queue";
+import type { ClaimedBatch } from "./simple-queue";
 
 const gzip = promisify(gzipCallback);
 
-export class SegmentUploader {
+export class Uploader {
   private timer?: ReturnType<typeof setInterval>;
   private inFlight?: Promise<void>;
   private stopped = false;
@@ -32,13 +33,9 @@ export class SegmentUploader {
   private leaseFailureCount = 0;
   private nextLeaseAttemptAtMs = 0;
 
-  constructor(
-    private readonly runtime: ExporterRuntime,
-    private readonly checkpointStore: CheckpointStore,
-    private readonly writer: EventWriter,
-  ) {}
+  constructor(private readonly runtime: ExporterRuntime) {}
 
-  startPeriodicLoop(): void {
+  start(): void {
     if (this.timer) return;
 
     this.stopped = false;
@@ -74,43 +71,28 @@ export class SegmentUploader {
     return this.inFlight;
   }
 
-  async runOnce(): Promise<void> {
-    await this.writer.flushExpired();
-    await this.uploadReadyChunks();
-  }
-
-  async uploadReadyChunks(): Promise<void> {
-    const readyChunks = await listReadyChunks(this.runtime.paths.spoolDir);
-    for (const readyChunk of readyChunks) {
-      if (this.stopped) return;
-      await this.uploadReadyChunk(readyChunk.filePath, readyChunk.seqStart, readyChunk.seqEnd);
-    }
-  }
-
-  private async uploadReadyChunk(filePath: string, seqStart: number, seqEnd: number): Promise<void> {
-    const segmentMeta = await readJsonlSegmentMeta(filePath);
-    if (segmentMeta.eventCount === 0) {
-      throw new Error(`ready chunk is empty: ${filePath}`);
-    }
-
-    const raw = await readFile(filePath);
-    const gzipped = await gzip(raw);
-    const s3Key = await this.uploadWithLeaseRetry(gzipped);
-
-    await this.checkpointStore.update((checkpoint) => {
-      checkpoint.uploadedThroughSeq = Math.max(checkpoint.uploadedThroughSeq, seqEnd);
-      checkpoint.recentUploads.push({
-        chunkId: chunkId(seqStart, seqEnd),
-        seqStart,
-        seqEnd,
-        s3Bucket: EXPORT_BUCKET,
-        s3Key,
-        uploadedAt: new Date().toISOString(),
+  private async runOnce(): Promise<void> {
+    while (!this.stopped) {
+      const batch = await claimBatch(this.runtime.paths, {
+        maxEvents: BATCH_MAX_EVENTS,
+        maxBytes: BATCH_MAX_BYTES,
+        logger: this.runtime.logger,
       });
-      checkpoint.recentUploads = checkpoint.recentUploads.slice(-RECENT_UPLOAD_LIMIT);
-    });
+      if (!batch) return;
 
-    await rm(filePath, { force: true });
+      try {
+        await this.uploadBatch(batch);
+        await commitBatch(batch);
+      } catch (err) {
+        await releaseBatch(batch, this.runtime.paths);
+        throw err;
+      }
+    }
+  }
+
+  private async uploadBatch(batch: ClaimedBatch): Promise<void> {
+    const gzipped = await gzip(buildJsonl(batch.events));
+    await this.uploadWithLeaseRetry(gzipped);
   }
 
   private async uploadWithLeaseRetry(gzipped: Buffer): Promise<string> {
@@ -120,7 +102,7 @@ export class SegmentUploader {
       const lease = await this.getUploadLease();
       if (lease.maxObjectBytes !== undefined && gzipped.byteLength > lease.maxObjectBytes) {
         throw new Error(
-          `gzipped export segment is ${gzipped.byteLength} bytes; lease maxObjectBytes is ${lease.maxObjectBytes}`,
+          `gzipped export batch is ${gzipped.byteLength} bytes; lease maxObjectBytes is ${lease.maxObjectBytes}`,
         );
       }
 
@@ -220,7 +202,10 @@ export function resolveUploadLeaseUrl(): string {
   return UPLOAD_LEASE_URL;
 }
 
-async function readCachedLease(leasePath: string, logger: ExporterRuntime["logger"]): Promise<UploadLease | undefined> {
+async function readCachedLease(
+  leasePath: string,
+  logger: ExporterRuntime["logger"],
+): Promise<UploadLease | undefined> {
   try {
     const raw = await readFile(leasePath, "utf8");
     return normalizeUploadLease(JSON.parse(stripJsonBom(raw)));
@@ -237,8 +222,8 @@ async function requestUploadLease(runtime: ExporterRuntime): Promise<UploadLease
   const response = await fetch(resolveUploadLeaseUrl(), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${runtime.apiKey}`,
       "Content-Type": "application/json",
+      "x-api-key": runtime.apiKey,
     },
     body: JSON.stringify({
       host: runtime.host,
