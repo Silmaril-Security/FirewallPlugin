@@ -144,29 +144,71 @@ export async function recoverStaleBatches(
       continue;
     }
 
-    if (!info.isDirectory()) continue;
-    if (info.mtimeMs > cutoffMs) continue;
+    // Orphan file at the top of inflight/ (not a batch directory) — remove
+    // regardless of age. claimBatch only ever creates pid-batchId subdirs, so
+    // any file here is leftover state from corruption, manual intervention,
+    // or a previous broken version.
+    if (!info.isDirectory()) {
+      await fsp.rm(dirPath, { force: true }).catch((err) => {
+        logger.warn(`failed to remove orphan inflight file ${dirPath}`, err);
+      });
+      continue;
+    }
 
-    const files = await fsp.readdir(dirPath).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") return [] as string[];
-      throw err;
-    });
+    // Stale batch directory: recover its files back to pending.
+    if (info.mtimeMs <= cutoffMs) {
+      const files = await fsp.readdir(dirPath).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT") return [] as string[];
+        throw err;
+      });
 
-    for (const fileName of files) {
-      const from = path.join(dirPath, fileName);
-      const to = path.join(paths.pendingDir, fileName);
-      try {
-        await fsp.rename(from, to);
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException)?.code;
-        if (code === "ENOENT") continue;
-        logger.warn(`failed to recover stale event ${from}`, err);
+      for (const fileName of files) {
+        const from = path.join(dirPath, fileName);
+        const to = path.join(paths.pendingDir, fileName);
+        try {
+          await fsp.rename(from, to);
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code === "ENOENT") continue;
+          logger.warn(`failed to recover stale event ${from}`, err);
+        }
       }
     }
 
-    await fsp.rmdir(dirPath).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT" || err.code === "ENOTEMPTY") return;
-      logger.warn(`failed to remove stale inflight directory ${dirPath}`, err);
+    // Always clean up empty batch directories (whether stale or fresh).
+    // commitBatch and releaseBatch each call rmdir but swallow filesystem races
+    // (ENOTEMPTY from caching, transient EBUSY); without this sweep the empty
+    // dirs accumulate over many crash-recovery or commit cycles.
+    const remaining = await fsp.readdir(dirPath).catch(() => [] as string[]);
+    if (remaining.length === 0) {
+      await fsp.rmdir(dirPath).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === "ENOENT" || err.code === "ENOTEMPTY") return;
+        logger.warn(`failed to remove empty inflight directory ${dirPath}`, err);
+      });
+    }
+  }
+
+  // Sweep tmp/ for orphan .json files — these are leftover from interrupted
+  // enqueueEvent calls (process killed between writeFile and rename). Without
+  // a sweep, every crash leaks a tmp file that's never cleaned up.
+  const tmpEntries = await fsp.readdir(paths.tmpDir).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === "ENOENT") return [] as string[];
+    throw err;
+  });
+
+  for (const entry of tmpEntries) {
+    if (!entry.endsWith(".json")) continue;
+    const filePath = path.join(paths.tmpDir, entry);
+    let info;
+    try {
+      info = await fsp.stat(filePath);
+    } catch {
+      continue;
+    }
+    if (!info.isFile()) continue;
+    if (info.mtimeMs > cutoffMs) continue;
+    await fsp.rm(filePath, { force: true }).catch((err) => {
+      logger.warn(`failed to remove orphan tmp file ${filePath}`, err);
     });
   }
 }
@@ -250,10 +292,11 @@ export async function commitBatch(batch: ClaimedBatch): Promise<void> {
   for (const claimed of batch.events) {
     await fsp.rm(claimed.inflightPath, { force: true });
   }
-  await fsp.rmdir(batch.inflightDir).catch((err: NodeJS.ErrnoException) => {
-    if (err.code === "ENOENT") return;
-    throw err;
-  });
+  // Best-effort: rmdir can fail with ENOTEMPTY due to filesystem caching
+  // (especially on Docker volume mounts on Windows/macOS) even after we just
+  // removed all known children. The next recoverStaleBatches sweep will pick
+  // up any empty leftover directory.
+  await fsp.rmdir(batch.inflightDir).catch(() => undefined);
 }
 
 export async function releaseBatch(batch: ClaimedBatch, paths: ExporterPaths): Promise<void> {

@@ -55,6 +55,19 @@ if (fakeS3Url && fpReviewLog && uploadLeaseLog) {
 
   setGlobalDispatcher(mock);
   globalThis.fetch = fetch;
+
+  // OpenClaw's `undici-global-dispatcher` (in dist/) calls setGlobalDispatcher(
+  // new Agent(...)) shortly after startup to apply default stream timeouts.
+  // That would clobber our MockAgent and the exporter would hit real AWS.
+  // undici stores the dispatcher in two well-known globalThis symbols
+  // (see undici/lib/global.js); we lock both with writable:false so any
+  // subsequent setGlobalDispatcher() throws — openclaw's try/catch swallows it.
+  try {
+    const sym1 = Symbol.for("undici.globalDispatcher.1");
+    const sym2 = Symbol.for("undici.globalDispatcher.2");
+    Object.defineProperty(globalThis, sym1, { value: globalThis[sym1], writable: false, configurable: false });
+    Object.defineProperty(globalThis, sym2, { value: globalThis[sym2], writable: false, configurable: false });
+  } catch {}
 }
 
 function buildUploadLease(fakeS3Url, bucket, prefix) {

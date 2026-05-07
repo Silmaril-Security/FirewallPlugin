@@ -9,6 +9,12 @@
 //        --state-dir /tmp/x --count 50 --corr-id RUN_A \
 //        [--source hook_event] [--hook-name before_prompt_build] \
 //        [--payload-bytes 100] [--concurrent 1] [--prefix runtime]
+//
+//   # Paced injection (mutually exclusive with --count): writes events at
+//   # --rate events/sec for --duration-ms milliseconds. Useful for sustained
+//   # load and soak tests where wall-clock pacing matters more than total count.
+//   node --import tsx scripts/exporter-bench.mjs \
+//        --state-dir /tmp/x --rate 50 --duration-ms 300000 --corr-id SOAK_A
 
 import path from "node:path";
 import os from "node:os";
@@ -18,6 +24,8 @@ function parseArgs(argv) {
   const args = {
     stateDir: process.env.OPENCLAW_STATE_DIR ?? path.join(os.homedir(), ".openclaw"),
     count: 1,
+    rate: 0,
+    durationMs: 0,
     corrId: "RUN_DEFAULT",
     source: "hook_event",
     hookName: "before_prompt_build",
@@ -33,6 +41,8 @@ function parseArgs(argv) {
     switch (arg) {
       case "--state-dir": args.stateDir = next; i++; break;
       case "--count": args.count = Number(next); i++; break;
+      case "--rate": args.rate = Number(next); i++; break;
+      case "--duration-ms": args.durationMs = Number(next); i++; break;
       case "--corr-id": args.corrId = next; i++; break;
       case "--source": args.source = next; i++; break;
       case "--hook-name": args.hookName = next === "" ? undefined : next; i++; break;
@@ -95,7 +105,24 @@ async function main() {
   };
 
   let done = 0;
-  if (args.concurrent <= 1) {
+
+  // Paced mode: --rate + --duration-ms takes precedence over --count.
+  if (args.rate > 0 && args.durationMs > 0) {
+    const intervalMs = 1000 / args.rate;
+    const deadline = Date.now() + args.durationMs;
+    let i = 0;
+    let nextDue = Date.now();
+    while (Date.now() < deadline) {
+      const now = Date.now();
+      if (now < nextDue) {
+        await new Promise((r) => setTimeout(r, nextDue - now));
+      }
+      await enqueueOne(i);
+      done++;
+      i++;
+      nextDue += intervalMs;
+    }
+  } else if (args.concurrent <= 1) {
     for (let i = 0; i < args.count; i++) {
       await enqueueOne(i);
       done++;
