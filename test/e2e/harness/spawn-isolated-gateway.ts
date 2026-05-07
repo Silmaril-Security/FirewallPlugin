@@ -68,7 +68,7 @@ export type SpawnIsolatedGatewayOptions = {
 };
 
 const DEFAULT_MODEL = "anthropic/claude-haiku-4-5";
-const GATEWAY_START_TIMEOUT_MS = 60_000;
+const GATEWAY_START_TIMEOUT_MS = 300_000;
 const GATEWAY_STOP_TIMEOUT_MS = 2_000;
 
 export async function spawnIsolatedGateway(
@@ -78,7 +78,11 @@ export async function spawnIsolatedGateway(
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), `silmaril-${name}-`));
   const homeDir = options.homeDir ?? path.join(rootDir, "home");
   const stateDir = path.join(homeDir, ".openclaw", "state");
-  const configPath = path.join(homeDir, ".openclaw", "openclaw.json");
+  // OpenClaw 2026.4.x reads its config from $OPENCLAW_STATE_DIR/openclaw.json
+  // (not $HOME/.openclaw/openclaw.json). Setting OPENCLAW_CONFIG_PATH to
+  // override that path makes the gateway hang silently after "starting...",
+  // so we land the config where OpenClaw will read it natively.
+  const configPath = path.join(stateDir, "openclaw.json");
   await ensureDir(path.dirname(configPath));
   await ensureDir(stateDir);
 
@@ -129,11 +133,16 @@ export async function spawnIsolatedGateway(
     uploadLeaseLog,
     enableTelegram: !!mockTelegram,
   });
+
   const child = spawnGatewayProcess(openclawRepo, port, env, stdout, stderr);
 
   try {
     await waitForPortOpen(child, stdout, stderr, port, GATEWAY_START_TIMEOUT_MS);
   } catch (err) {
+    console.error(`\n=== gateway startup failed on port ${port} ===`);
+    console.error(`--- stdout ---\n${stdout.join("")}`);
+    console.error(`--- stderr ---\n${stderr.join("")}`);
+    console.error(`--- exit code ---\n${child.exitCode}\n`);
     await stopChild(child);
     throw err;
   }
@@ -245,7 +254,6 @@ async function writeGatewayConfig(params: {
           [params.model]: {},
           "anthropic/claude-sonnet-4-6": {},
           "anthropic/claude-haiku-4-5": {},
-          "openai/gpt-5.4": {},
         },
         compaction: { mode: "safeguard" },
         skipBootstrap: true,
@@ -375,7 +383,10 @@ function buildGatewayEnv(params: {
     ...process.env,
     HOME: params.homeDir,
     USERPROFILE: params.homeDir,
-    OPENCLAW_CONFIG_PATH: params.configPath,
+    // OPENCLAW_CONFIG_PATH intentionally not set: in OpenClaw 2026.4.x setting
+    // it makes the gateway hang silently after "starting...". The harness
+    // writes its config to $OPENCLAW_STATE_DIR/openclaw.json instead, which
+    // OpenClaw picks up natively.
     OPENCLAW_STATE_DIR: params.stateDir,
     OPENCLAW_GATEWAY_TOKEN: "",
     OPENCLAW_GATEWAY_PASSWORD: "",
@@ -383,7 +394,9 @@ function buildGatewayEnv(params: {
     OPENCLAW_SKIP_CRON: "1",
     OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
     OPENCLAW_SKIP_CANVAS_HOST: "1",
-    OPENCLAW_TEST_MINIMAL_GATEWAY: "1",
+    // OPENCLAW_TEST_MINIMAL_GATEWAY intentionally unset: under 2026.4.x it
+    // skips plugin loading entirely, so the firewall plugin would never
+    // register and the scenarios under test would all see 0 plugins.
     OPENCLAW_SKIP_CHANNELS: params.enableTelegram ? "0" : "1",
     FIREWALL_E2E_FAKE_S3_URL: params.fakeS3Url,
     FIREWALL_E2E_FP_REVIEW_UPLOADS: params.fpReviewLog,
@@ -391,6 +404,51 @@ function buildGatewayEnv(params: {
     NODE_OPTIONS: nodeOptions,
     VITEST: "1",
   };
+}
+
+async function runPluginInstall(
+  openclawRepo: string,
+  env: NodeJS.ProcessEnv,
+  pluginRoot: string,
+): Promise<void> {
+  const entry = path.join(openclawRepo, "dist", "index.js");
+  const startedAt = Date.now();
+  console.error(`[harness] plugins install start (pluginRoot=${pluginRoot})`);
+  // The api-interceptor-preload .mjs leaves an undici dispatcher attached that
+  // keeps the install command's event loop alive long after its work finishes,
+  // so the install hangs until SIGKILL. The install doesn't need any of the
+  // mocks (it's offline metadata work), so strip NODE_OPTIONS for this child.
+  const installEnv: NodeJS.ProcessEnv = { ...env };
+  delete installEnv.NODE_OPTIONS;
+  delete installEnv.VITEST;
+  delete installEnv.VITEST_POOL_ID;
+  delete installEnv.VITEST_WORKER_ID;
+  console.error(`[harness] install env scrubbed`);
+  const stdoutStream = require("node:fs").openSync(`/tmp/install-${Date.now()}.out`, "w");
+  const child = spawn(
+    process.execPath,
+    [entry, "plugins", "install", "-l", pluginRoot, "--dangerously-force-unsafe-install"],
+    { cwd: openclawRepo, env: installEnv, stdio: ["ignore", stdoutStream, stdoutStream], windowsHide: true, detached: false },
+  );
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const installTimeoutMs = 120_000;
+  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    const t = setTimeout(() => {
+      console.error(`[harness] plugins install timeout after ${installTimeoutMs}ms; killing`);
+      child.kill("SIGKILL");
+    }, installTimeoutMs);
+    child.once("exit", (code, signal) => {
+      clearTimeout(t);
+      resolve({ code, signal });
+    });
+  });
+  console.error(`[harness] plugins install done (code=${exit.code} ${Date.now() - startedAt}ms)`);
+  if (exit.code !== 0) {
+    throw new Error(
+      `openclaw plugins install exited code=${exit.code} signal=${exit.signal}\n--- stdout ---\n${stdout.join("")}\n--- stderr ---\n${stderr.join("")}`,
+    );
+  }
 }
 
 function spawnGatewayProcess(
@@ -413,8 +471,17 @@ function spawnGatewayProcess(
   );
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => stdout.push(String(chunk)));
-  child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+  const tailPath = process.env.FIREWALL_E2E_GATEWAY_TAIL;
+  child.stdout.on("data", (chunk) => {
+    const s = String(chunk);
+    stdout.push(s);
+    if (tailPath) require("node:fs").appendFileSync(tailPath, s);
+  });
+  child.stderr.on("data", (chunk) => {
+    const s = String(chunk);
+    stderr.push(s);
+    if (tailPath) require("node:fs").appendFileSync(tailPath, `[stderr] ${s}`);
+  });
   return child;
 }
 

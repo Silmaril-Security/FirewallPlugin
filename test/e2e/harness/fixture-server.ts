@@ -23,6 +23,8 @@ export type FixtureId =
 
 export type FixtureServer = ServerHandle & {
   url(id: FixtureId, query?: string): string;
+  benchUrl(id: string, query?: string): string;
+  registerBenchFixture(id: string, body: string | Buffer, headers?: Record<string, string>): void;
   nonResolvableUrl(path?: string): string;
 };
 
@@ -34,7 +36,8 @@ export const FIXTURE_CANARIES = {
   secret: "CANARY_API_KEY_20260503_4f143d4c",
 } as const;
 
-export async function startFixtureServer(opts: { port?: number; host?: string } = {}): Promise<FixtureServer> {
+export async function startFixtureServer(): Promise<FixtureServer> {
+  const benchFixtures = new Map<string, { body: string | Buffer; headers: Record<string, string> }>();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
@@ -71,6 +74,17 @@ export async function startFixtureServer(opts: { port?: number; host?: string } 
       return;
     }
 
+    if (url.pathname.startsWith("/bench/")) {
+      const fixtureId = decodeURIComponent(url.pathname.slice("/bench/".length));
+      const fixture = benchFixtures.get(fixtureId);
+      if (!fixture) {
+        writeJson(res, 404, { error: "bench_fixture_not_found" });
+        return;
+      }
+      writeText(res, 200, fixture.body, fixture.headers);
+      return;
+    }
+
     const fixtureId = parseFixtureId(url.pathname);
     if (!fixtureId) {
       writeJson(res, 404, { error: "fixture_not_found" });
@@ -81,12 +95,19 @@ export async function startFixtureServer(opts: { port?: number; host?: string } 
     writeText(res, 200, body, fixtureHeaders(fixtureId));
   });
 
-  const handle = await listen(server, opts.port ?? 0, opts.host ?? "127.0.0.1");
+  const handle = await listen(server);
   return {
     ...handle,
     url(id, query = "") {
       const suffix = query ? (query.startsWith("?") ? query : `?${query}`) : "";
       return `${handle.origin}/fixtures/${fixturePath(id)}${suffix}`;
+    },
+    benchUrl(id, query = "") {
+      const suffix = query ? (query.startsWith("?") ? query : `?${query}`) : "";
+      return `${handle.origin}/bench/${encodeURIComponent(id)}${suffix}`;
+    },
+    registerBenchFixture(id, body, headers = { "content-type": "text/html; charset=utf-8" }) {
+      benchFixtures.set(id, { body, headers });
     },
     nonResolvableUrl(path = "/unreachable") {
       return `http://nonexistent.openclaw-firewall-e2e.invalid${path}`;

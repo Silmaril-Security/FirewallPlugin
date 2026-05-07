@@ -1,6 +1,4 @@
 node_modules/
 .manual/
-.live-smoke/
-.claude/
-e2e-detailed*.log
-e2e-identity*.log
+.pnpm-store/
+docker/e2e-exporter*.log

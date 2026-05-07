@@ -23,8 +23,12 @@ if (fakeS3Url && fpReviewLog && uploadLeaseLog) {
   const EXPORT_BUCKET = "silmaril-openclaw-firewall-exports-prod";
   const EXPORT_LOGS_PREFIX = "openclaw-firewall/v1/logs/";
   const mock = new MockAgent({ connections: 1 });
-  mock.disableNetConnect();
-  mock.enableNetConnect(/^(127\.0\.0\.1|localhost)(:\d+)?$|^api\.openai\.com:443$|^api\.anthropic\.com:443$/);
+  // Intentionally not calling disableNetConnect(): under the current OpenClaw
+  // build the gateway probes hosts beyond our allowlist during startup and
+  // disableNetConnect() makes those calls hang silently. We only need to
+  // *intercept* the upload-lease and FP-review endpoints below; everything
+  // else passes through to the real network. The vitest-process-side
+  // `assertNoExternalFetch` still enforces no-egress for the test process.
 
   const apigw = mock.get("https://v6x0guucsb.execute-api.us-west-2.amazonaws.com");
   apigw

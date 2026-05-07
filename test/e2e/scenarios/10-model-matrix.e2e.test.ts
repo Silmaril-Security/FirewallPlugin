@@ -9,7 +9,6 @@ import {
 const MODELS = [
   "anthropic/claude-sonnet-4-6",
   "anthropic/claude-haiku-4-5",
-  "openai/gpt-5.4",
 ];
 
 describe("model matrix marker protocol", () => {

@@ -5,20 +5,13 @@ export const FIXED_API_KEY_PATH_ID = "1of9epawm2" as const;
 export const UPLOAD_LEASE_URL =
   "https://v6x0guucsb.execute-api.us-west-2.amazonaws.com/prod/v1/openclaw/firewall-export/upload-lease" as const;
 
-export const SEGMENT_SIZE_LIMIT_BYTES = 1024 * 1024;
-export const SEGMENT_TIME_LIMIT_MS = 30 * 1000;
 export const LEASE_MAX_AGE_MS = 30 * 60 * 1000;
 export const LEASE_REFRESH_THRESHOLD_MS = 15 * 60 * 1000;
-export const RECENT_UPLOAD_LIMIT = 100;
-export const MAX_SPOOL_BYTES = 512 * 1024 * 1024;
-export const UPLOAD_LOOP_INTERVAL_MS = 10 * 1000;
-export const FILE_COLLECTOR_LOOP_INTERVAL_MS = 5 * 1000;
-export const FILE_COLLECTOR_RECENT_EVENT_LIMIT = 5000;
-export const FILE_COLLECTOR_MAX_LINES_PER_FILE = 500;
-export const EVENT_SEQUENCER_LOOP_INTERVAL_MS = 1000;
-export const EVENT_REORDER_WINDOW_MS = 20 * 1000;
-export const EVENT_SEQUENCER_RECENT_EVENT_LIMIT = 5000;
-export const SEQUENCE_WIDTH = 12;
+
+export const UPLOAD_LOOP_INTERVAL_MS = 60 * 1000;
+export const BATCH_MAX_EVENTS = 1000;
+export const BATCH_MAX_BYTES = 1_000_000;
+export const STALE_BATCH_MS = 5 * 60 * 1000;
 
 export const TRACE_HOOKS = [
   "gateway_start",
@@ -59,20 +52,12 @@ export const TRACE_HOOKS = [
 
 export type PluginHookName = (typeof TRACE_HOOKS)[number];
 
-export type ExportSource =
-  | "user_input"
-  | "tool_call"
-  | "tool_response"
-  | "hook_event"
-  | "agent_session_event"
-  | "gateway_log_event"
-  | "browser_telemetry_event";
+export type ExportSource = "user_input" | "tool_call" | "tool_response" | "hook_event";
 
 export type FirewallExportEvent = {
   schemaVersion: 1;
-  seq: number;
   ts: string;
-  eventId?: string;
+  eventId: string;
   apiKeyPathId: string;
   userEmail?: string;
   host: string;
@@ -107,20 +92,6 @@ export type UploadLease = {
   fetchedAt: string;
 };
 
-export type Checkpoint = {
-  version: 1;
-  nextSeq: number;
-  uploadedThroughSeq: number;
-  recentUploads: Array<{
-    chunkId: string;
-    seqStart: number;
-    seqEnd: number;
-    s3Bucket: typeof EXPORT_BUCKET;
-    s3Key: string;
-    uploadedAt: string;
-  }>;
-};
-
 export type ExporterLogger = {
   info(message: string, error?: unknown): void;
   warn(message: string, error?: unknown): void;
@@ -130,15 +101,10 @@ export type ExporterLogger = {
 export type ExporterPaths = {
   stateDir: string;
   exportDir: string;
-  spoolDir: string;
+  pendingDir: string;
+  inflightDir: string;
+  tmpDir: string;
   logsDir: string;
-  checkpointPath: string;
-  collectorCheckpointPath: string;
-  sequencerCheckpointPath: string;
-  inboxDir: string;
-  inboxTmpDir: string;
-  inboxReadyDir: string;
-  lockPath: string;
   leasePath: string;
   logPath: string;
 };

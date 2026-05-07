@@ -1,0 +1,23 @@
+# Thin test image: Node 24 + pnpm via corepack + tools needed to compile
+# matrix-sdk-crypto and other native modules during pnpm install. The OpenClaw
+# source and the silmaril-plugin worktree are bind-mounted at runtime, so this
+# image stays small and re-buildable in seconds.
+FROM node:24-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git curl ca-certificates python3 build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable
+
+# Pre-warm pnpm so the first per-project run doesn't pay corepack download
+# cost. The container will use whichever packageManager each project pins.
+RUN corepack prepare pnpm@10.0.0 --activate || true
+
+# Install Bun — openclaw build scripts invoke it (per its Dockerfile).
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+WORKDIR /work
+CMD ["sleep", "infinity"]
