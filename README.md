@@ -426,19 +426,65 @@ openclaw-firewall/v1/logs/<tenant-path-id>/yyyy/mm/dd/hh/<uuid>.jsonl.gz
 
 Use the first path segment from your classify API host as a practical tenant/path id check. For example, `https://1of9epawm2.execute-api.us-west-2.amazonaws.com/alpha/classify` corresponds to exported log paths under `openclaw-firewall/v1/logs/1of9epawm2/...`.
 
-Local exporter state lives under:
+### Local exporter state
+
+The exporter writes to a state directory under your OpenClaw state root (`~/.openclaw/firewall-plugin/export`, or `$OPENCLAW_STATE_DIR/firewall-plugin/export` if `OPENCLAW_STATE_DIR` is set). The current pipeline is a file-as-commit queue:
 
 ```text
-~/.openclaw/firewall-plugin/export
+firewall-plugin/export/
+  pending/   <ISO-ts>-<pid>-<uuid>.json   one event per file, queued for upload
+  inflight/  <pid>-<batchId>/             a batch claimed for upload (rename from pending)
+  tmp/       <uuid>.json                  in-progress writes; renamed atomically into pending/
+  logs/      exporter.log                 warnings only (success path is silent)
+  upload-lease.json                       cached presigned-POST lease
 ```
 
 Useful verification points:
 
-- `checkpoint.json` should advance `uploadedThroughSeq`
-- `spool/*.ready` should drain after successful upload
-- `logs/exporter.log` should show exporter startup and no current upload-lease failures
+- `pending/` should drain to S3 within ~60s (one upload tick) after each event burst
+- `inflight/<pid>-<batchId>/` is a transient holding directory while a batch uploads; on commit it's removed, on failure it's renamed back into `pending/`
+- `logs/exporter.log` is silent on success; lines starting with `"level":"warn"` indicate upload-lease, S3, or filesystem issues
+- `upload-lease.json` has `expiresAt`; refreshed automatically when stale or after a 403 ExpiredToken
+
+The next gateway startup runs `recoverStaleBatches`, which:
+
+1. Recovers files from any inflight batch directory whose mtime is older than 5 minutes (returns them to `pending/`)
+2. Removes empty inflight batch directories regardless of age (cleans up after `commitBatch` filesystem races)
+3. Removes orphan files at the top of `inflight/` (any non-directory entries — leftover state from corruption or earlier broken versions)
+4. Removes orphan `.json` files in `tmp/` older than 5 minutes (leftover from `enqueueEvent` calls that died between write and rename)
+
+Legacy state from older exporter versions (`spool/`, `inbox/`, `checkpoint.json`, `sequencer-checkpoint.json`, `collector-checkpoint.json`, `exporter.lock`) is purged on startup automatically.
 
 If upload leases return `403 Forbidden`, check that the exporter is using the Silmaril/classifier API key as `x-api-key`. The false-positive review queue may use a different key; that key is not necessarily valid for export upload leases.
+
+## Role-Based Policy
+
+The plugin enforces a role-based action when classification triggers a guard: an `admin` role gets a warning prompt with override, a `user` role gets a hard block. The role is resolved per-session from the configured `userEmail` (or the `USER_EMAIL` environment variable as fallback).
+
+Policy resolution has two modes:
+
+- **Hardcoded fallback** (default): a built-in admin allowlist is checked. The install log line reports `firewall-plugin: policy client=hardcoded`.
+- **HTTP policy endpoint** (recommended for deployments): set `rolePolicyEndpoint` in plugin config to an HTTP service that returns the role for an email. The install log line reports `firewall-plugin: policy client=http`.
+
+Example:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "firewall-plugin": {
+        "enabled": true,
+        "config": {
+          "userEmail": "user@example.com",
+          "rolePolicyEndpoint": "https://your-policy-service.example.com/role"
+        }
+      }
+    }
+  }
+}
+```
+
+The endpoint receives `{"identifier": "user@example.com"}` and should return `{"role": "admin"|"user", ...}`. Network failures and missing config fall back to `role=user` (the more restrictive default). The current resolved policy logs at startup as `firewall-plugin: policy=<block|warn> role=<user|admin>`.
 
 ## Manual Smoke Checks
 
@@ -471,9 +517,11 @@ firewall-plugin: github_issue_read wrapper classified AumUpadhyay/RestaurantAppU
 
 ## E2E Failure Harness
 
-The power-user E2E harness in `test/e2e` runs isolated OpenClaw gateways with mocked Silmaril, false-positive review, S3 export, GitHub/Gmail egress, and optional Telegram delivery. It is designed to catch the kinds of OpenClaw orchestration failures that unit tests miss: disabled wrapper bypasses, stale approval state, false-positive review routing, exporter failure behavior, and model-marker handling.
+There are two complementary harnesses: a **vitest mock-based suite** for fast deterministic failure injection, and a **docker-based real-OpenClaw suite** for end-to-end validation against real Silmaril and S3.
 
-Run it from the plugin repo:
+### Vitest mock-based suite (`test/e2e`)
+
+Runs isolated OpenClaw gateways with mocked Silmaril, false-positive review, S3 export, GitHub/Gmail egress, and optional Telegram delivery. Designed to catch OpenClaw orchestration failures that unit tests miss: disabled wrapper bypasses, stale approval state, false-positive review routing, exporter failure behavior, and model-marker handling.
 
 ```sh
 npm run test:e2e
@@ -486,7 +534,41 @@ The harness expects an OpenClaw checkout, defaulting to `../openclaw-clean`:
 OPENCLAW_E2E_REPO=../openclaw-clean npm run test:e2e
 ```
 
-It creates isolated temp `HOME`, `USERPROFILE`, `OPENCLAW_CONFIG_PATH`, and `OPENCLAW_STATE_DIR` values per scenario and asserts the real `~/.openclaw` tree was not modified. See `test/e2e/README.md` for model-key requirements, failure artifacts, and the scenario list.
+It creates isolated temp `HOME`, `USERPROFILE`, `OPENCLAW_CONFIG_PATH`, and `OPENCLAW_STATE_DIR` values per scenario and asserts the real `~/.openclaw` tree was not modified. Scenario `12-s3-failure-matrix.e2e.test.ts` covers the full S3 retry matrix (ExpiredToken, KeyAlreadyExists, RequestTimeout, InvalidAccessKey, SignatureMismatch, WAFBlock, ConnectionReset, EntityTooLarge no-loop). See `test/e2e/README.md` for model-key requirements, failure artifacts, and the scenario list.
+
+> **Note**: the preload at `test/e2e/harness/api-interceptor-preload.mjs` locks undici's globalDispatcher symbols (`Symbol.for("undici.globalDispatcher.1")` and `.2`) with `writable:false` because OpenClaw 2026.4.x's `undici-global-dispatcher` calls `setGlobalDispatcher(new Agent(...))` at startup to apply default stream timeouts and would otherwise clobber the test MockAgent.
+
+### Docker-based real-OpenClaw suite (`docker/e2e-exporter.ps1`)
+
+Runs 70+ scenarios against a real OpenClaw 2026.4.20 container (built from `docker/Dockerfile`) hitting real Silmaril classifier and real S3. The container is the isolation boundary — multiple named containers run in parallel without host-level locks.
+
+```powershell
+pwsh ./docker/build.ps1
+pwsh ./docker/e2e-exporter.ps1 -AnthropicKey $env:ANTHROPIC_API_KEY
+# Filter by group or scenario name:
+pwsh ./docker/e2e-exporter.ps1 -AnthropicKey $env:ANTHROPIC_API_KEY -OnlyGroup A,M,O
+pwsh ./docker/e2e-exporter.ps1 -AnthropicKey $env:ANTHROPIC_API_KEY -OnlyName "o.cleanup-empty-inflight"
+```
+
+Scenario groups:
+
+- **A**: basic delivery (1, 50, 1500 events; various sources; real agent hooks)
+- **B**: S3 object schema and shape
+- **C**: crash recovery (kill before tick, stale-inflight recovery, malformed pending, kill-during-load)
+- **D**: legacy purge (spool/inbox/checkpoint cleanup)
+- **E**: lease handling
+- **F**: batch boundaries (1000-event cap, 1MB cap)
+- **G**: durability (write-survives-immediate-kill, tmp-no-orphans, one-event-per-pending-file)
+- **H**: parallelism (concurrent writes, distinct filenames, two containers shared volume, rapid restart cycles)
+- **I**: configuration (state-dir env override)
+- **J**: hooks integration
+- **K**: S3 object content shape
+- **L**: edge cases (empty payload, back-to-back bench, long correlation id, special chars)
+- **M**: memory/leak (init-failure, uploader-stuck, log-file growth bound)
+- **N**: power-user soak (3 lanes × 15 min, mixed burst+stream, two-gateways-shared-volume, lease-churn)
+- **O**: recovery sequence (kill-mid-upload checkpoints, fast-recovery diagnostic, empty inflight + tmp orphan cleanup)
+
+The bench script `scripts/exporter-bench.mjs` supports both count-based (`--count N`) and paced (`--rate N --duration-ms M`) injection for soak tests.
 
 ## Web Fetch Behavior
 
