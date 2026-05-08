@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { SessionLock } from "./session-lock";
 import { PolicyCache } from "./policy-cache";
-import { createHardcodedPolicyClient, type PolicyClient } from "./policy-client";
+import { createHardcodedPolicyClient, createHttpPolicyClient, type PolicyClient } from "./policy-client";
 import {
   decide,
   translateForToolCall,
@@ -321,3 +321,135 @@ test("hardcoded client: null email maps to user/block (fail-closed default)", as
 
 // Identity resolution is provided by dev's `src/user-email.ts` (resolveUserEmail).
 // Tests for that module live in `src/user-email.test.ts`.
+
+// ---------------- HTTP PolicyClient ----------------
+
+interface FetchCall {
+  url: string;
+  init: RequestInit;
+}
+
+function makeFetchStub(
+  response: { status: number; body?: unknown },
+  capture: FetchCall[],
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    capture.push({ url: String(input), init });
+    return new Response(JSON.stringify(response.body ?? {}), {
+      status: response.status,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+}
+
+test("http client: throws when endpoint missing", () => {
+  assert.throws(() => createHttpPolicyClient("", "key"), /endpoint is required/);
+});
+
+test("http client: throws when apiKey missing", () => {
+  assert.throws(() => createHttpPolicyClient("https://x", ""), /apiKey is required/);
+});
+
+test("http client: posts JSON body with x-api-key header to the endpoint", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub(
+    { status: 200, body: { action: "warn", resolved_role: "admin" } },
+    calls,
+  );
+  const client = createHttpPolicyClient("https://example.test/role", "K123", fetchStub);
+
+  const out = await client.fetchPolicy("gary@silmaril.dev");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://example.test/role");
+  assert.equal(calls[0]!.init.method, "POST");
+  const headers = calls[0]!.init.headers as Record<string, string>;
+  assert.equal(headers["x-api-key"], "K123");
+  assert.equal(headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { email: "gary@silmaril.dev" });
+  assert.deepEqual(out, { action: "warn", resolved_role: "admin" });
+});
+
+test("http client: passes null email through unchanged", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub(
+    { status: 200, body: { action: "block", resolved_role: "user" } },
+    calls,
+  );
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  await client.fetchPolicy(null);
+
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { email: null });
+});
+
+test("http client: response without resolved_role omits the field", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub(
+    { status: 200, body: { action: "block" } },
+    calls,
+  );
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  const out = await client.fetchPolicy("x@y");
+  assert.deepEqual(out, { action: "block" });
+});
+
+test("http client: 5xx with PolicyResponse body returns the body (API fail-open)", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub(
+    { status: 503, body: { action: "warn", resolved_role: "fallback" } },
+    calls,
+  );
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  const out = await client.fetchPolicy("x@y");
+  assert.deepEqual(out, { action: "warn", resolved_role: "fallback" });
+});
+
+test("http client: 4xx with PolicyResponse body returns deny per API contract", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub(
+    { status: 401, body: { action: "block", resolved_role: "user" } },
+    calls,
+  );
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  const out = await client.fetchPolicy("x@y");
+  assert.deepEqual(out, { action: "block", resolved_role: "user" });
+});
+
+test("http client: 5xx with non-PolicyResponse body throws so PolicyCache fails open", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub({ status: 503, body: { error: "down" } }, calls);
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  await assert.rejects(client.fetchPolicy("x@y"), /invalid action.*HTTP 503/);
+});
+
+test("http client: 401 with non-PolicyResponse body throws", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub({ status: 401, body: { error: "unauth" } }, calls);
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  await assert.rejects(client.fetchPolicy("x@y"), /invalid action.*HTTP 401/);
+});
+
+test("http client: invalid action in response throws", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub(
+    { status: 200, body: { action: "allow", resolved_role: "admin" } },
+    calls,
+  );
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  await assert.rejects(client.fetchPolicy("x@y"), /invalid action/);
+});
+
+test("http client: non-object response body throws", async () => {
+  const calls: FetchCall[] = [];
+  const fetchStub = makeFetchStub({ status: 200, body: "warn" }, calls);
+  const client = createHttpPolicyClient("https://x/role", "K", fetchStub);
+
+  await assert.rejects(client.fetchPolicy("x@y"), /non-object body/);
+});

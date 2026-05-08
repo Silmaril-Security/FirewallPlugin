@@ -8,7 +8,9 @@
     "manual:fp:clear": "node scripts/manual-fp-webhook.mjs clear",
     "test": "node --import tsx --test \"src/**/*.test.ts\" \"test/*.test.ts\"",
     "test:e2e": "vitest run --config test/e2e/vitest.config.ts",
-    "test:e2e:power-user": "vitest run --config test/e2e/vitest.config.ts test/e2e/scenarios"
+    "test:e2e:power-user": "vitest run --config test/e2e/vitest.config.ts test/e2e/scenarios",
+    "test:e2e:identity:mock": "vitest run --config test/e2e/vitest.config.ts test/e2e/scenarios/12-identity-mock-only.e2e.test.ts",
+    "bench:identity:compile": "node scripts/compile-identity-corpus.mjs"
   },
   "dependencies": {
     "@silmaril-security/sdk": "0.1.3"

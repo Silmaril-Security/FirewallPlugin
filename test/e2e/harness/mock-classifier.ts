@@ -16,13 +16,13 @@ import {
 
 export const TEST_SILMARIL_API_KEY = "test-silmaril-api-key";
 
-export type ClassifierPrediction = "BENIGN" | "MALICIOUS";
+export type ClassifierPrediction = "BENIGN" | "MALICIOUS" | "UNKNOWN";
 
 export type ClassifierResult = {
   prediction: ClassifierPrediction;
   score: number;
   primary_outcome: string;
-  outcome_scores: Record<ClassifierPrediction, number>;
+  outcome_scores: Partial<Record<ClassifierPrediction, number>> & { BENIGN: number; MALICIOUS: number };
   detector_scores: Record<string, number>;
   detector_counts: Record<string, number>;
 };
@@ -42,6 +42,8 @@ export type ForcedClassifierResponse = Partial<ClassifierResult> & {
   forceTimeout?: boolean;
   forceWAFBlock?: boolean;
   forceProcessKill?: boolean;
+  forceUnknown?: boolean;          // emit prediction="UNKNOWN" with score 0.5
+  forceEmptyPrediction?: boolean;  // emit prediction="" (regression guard)
 };
 
 export type MatchRule = {
@@ -279,6 +281,12 @@ function buildResponseBody(body: JsonRecord, forced?: ForcedClassifierResponse):
 }
 
 function forcedResult(forced: ForcedClassifierResponse): ClassifierResult {
+  if (forced.forceUnknown) {
+    return result("UNKNOWN", 0.5, "forced_unknown_prediction");
+  }
+  if (forced.forceEmptyPrediction) {
+    return result("" as ClassifierPrediction, 0, "forced_empty_prediction");
+  }
   return result(
     forced.prediction ?? "BENIGN",
     typeof forced.score === "number" ? forced.score : forced.prediction === "MALICIOUS" ? 0.93 : 0.02,

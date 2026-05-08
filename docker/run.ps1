@@ -16,6 +16,7 @@ param(
     [int]    $HostPort = 18790,
     [string] $AnthropicKeyOverride = "",
     [string] $FixtureUrl = "",
+    [string] $RolePolicyUrl = "",
     [string] $StateMount = "",
     [switch] $Detach,
     [switch] $RemoveExisting,
@@ -46,6 +47,8 @@ $silmarilKey   = if ($fp.silmarilApiKey) { $fp.silmarilApiKey } else { $fp.apiKe
 $silmarilUrl   = $fp.apiUrl
 $pluginKey     = $fp.apiKey
 $fpReportUrl   = if ($fp.falsePositiveReportUrl) { $fp.falsePositiveReportUrl } else { "" }
+$rolePolicyUrlFromHost = if ($fp.rolePolicyEndpoint) { $fp.rolePolicyEndpoint } else { "" }
+if (-not $RolePolicyUrl) { $RolePolicyUrl = $rolePolicyUrlFromHost }
 
 if (-not $silmarilKey) { throw "silmarilApiKey/apiKey missing in host firewall-plugin config" }
 if (-not $silmarilUrl) { throw "apiUrl missing in host firewall-plugin config" }
@@ -74,6 +77,7 @@ $dockerArgs = @(
     "-e", "SILMARIL_PLUGIN_API_KEY=$pluginKey",
     "-e", "SILMARIL_CLASSIFY_URL=$silmarilUrl",
     "-e", "SILMARIL_FP_REPORT_URL=$fpReportUrl",
+    "-e", "SILMARIL_ROLE_POLICY_URL=$RolePolicyUrl",
     "-e", "OPENCLAW_USER_EMAIL=$UserEmail"
 )
 if ($UserEmailEnv) { $dockerArgs += @("-e", "USER_EMAIL=$UserEmailEnv") }

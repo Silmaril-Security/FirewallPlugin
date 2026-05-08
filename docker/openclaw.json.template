@@ -31,7 +31,7 @@
   },
   "tools": {
     "profile": "coding",
-    "alsoAllow": ["web_fetch", "firewall_report_false_positive"],
+    "alsoAllow": ["web_fetch", "github_issue_read", "firewall_report_false_positive"],
     "web": {
       "fetch": {
         "enabled": false
@@ -69,8 +69,11 @@
           "apiKey": "${SILMARIL_PLUGIN_API_KEY}",
           "silmarilApiKey": "${SILMARIL_API_KEY}",
           "apiUrl": "${SILMARIL_CLASSIFY_URL}",
+          "rolePolicyEndpoint": "${SILMARIL_ROLE_POLICY_URL}",
           "falsePositiveReportUrl": "${SILMARIL_FP_REPORT_URL}",
-          "enableWebFetchWrapper": true
+          "enableWebFetchWrapper": true,
+          "webFetch": { "dangerouslyAllowPrivateNetwork": true },
+          "userEmail": "${OPENCLAW_USER_EMAIL}"
         }
       }
     },

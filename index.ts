@@ -66,7 +66,7 @@ import {
   extractToolResultText,
 } from "./metadata.ts";
 import { resolveUserEmail, withUserEmailClassifyOptions } from "./src/user-email";
-import { createHardcodedPolicyClient } from "./src/policy/policy-client";
+import { createHardcodedPolicyClient, createHttpPolicyClient } from "./src/policy/policy-client";
 import { PolicyCache } from "./src/policy/policy-cache";
 import { SessionLock } from "./src/policy/session-lock";
 import {
@@ -97,7 +97,13 @@ export default definePluginEntry({
     const userEmail = resolveUserEmail(pluginConfig.userEmail);
     api.logger.info(`firewall-plugin: identity=${userEmail ?? "<none>"}`);
 
-    const policyClient = createHardcodedPolicyClient();
+    const policyClient =
+      pluginConfig.rolePolicyEndpoint && silmarilApiKey
+        ? createHttpPolicyClient(pluginConfig.rolePolicyEndpoint, silmarilApiKey)
+        : createHardcodedPolicyClient();
+    api.logger.info(
+      `firewall-plugin: policy client=${pluginConfig.rolePolicyEndpoint ? "http" : "hardcoded"}`,
+    );
     const policyCache = new PolicyCache(policyClient, 5 * 60_000, api.logger);
     const sessionLock = new SessionLock();
     const FALLBACK_POLICY: PolicyResponse = { action: "warn", resolved_role: "fallback" };
@@ -518,7 +524,10 @@ export default definePluginEntry({
               api.logger?.info?.(`firewall-plugin: malicious tool-call approval resolved as ${approval} (sessionId=${sessionId ?? "unknown"})`);
             },
           });
-          if (policyResult) return policyResult;
+          if (policyResult) {
+            api.logger.info(`firewall-plugin: before_tool_call guard=${decision.kind} sessionId=${sessionId ?? "<none>"} toolName=${event.toolName} prediction=${result.prediction} score=${result.score}`);
+            return policyResult;
+          }
         }
 
       } catch (err) {
@@ -652,7 +661,10 @@ export default definePluginEntry({
             warnMessage,
             blockMessage,
           });
-          if (policyResult) return policyResult;
+          if (policyResult) {
+            api.logger.info(`firewall-plugin: tool_result_persist guard=${decision.kind} sessionId=${sessionId ?? "<none>"} toolName=${event.toolName ?? "<unknown>"} prediction=${result.prediction} score=${result.score}`);
+            return policyResult;
+          }
         }
       } catch (err) {
         console.error(`[firewall] tool_result_persist error:`, err);
@@ -788,7 +800,7 @@ export default definePluginEntry({
             : ctxStr.includes("pending_user_approval")
               ? "warn"
               : "unknown";
-        api.logger.info(`firewall-plugin: before_prompt_build guard=${tag} append=${appendSystemContext?.length ?? 0} prepend=${prependContext?.length ?? 0}`);
+        api.logger.info(`firewall-plugin: before_prompt_build guard=${tag} sessionId=${sessionId ?? "<none>"} append=${appendSystemContext?.length ?? 0} prepend=${prependContext?.length ?? 0}`);
       }
       return appendSystemContext || prependContext ? { appendSystemContext, prependContext } : undefined;
     });
@@ -801,7 +813,11 @@ function isFirewallMalicious(prediction: unknown): boolean {
 
 function isFirewallProceedApprovalPrompt(value: string): boolean {
   const normalized = value.toLowerCase();
-  const hasApproval = /\b(yes|yep|approved|approve|ok|okay|continue|proceed|go ahead)\b/.test(normalized);
+  // Approval verbs are pure affirmations only — proceed/continue/go-ahead are
+  // intent verbs and live in hasProceedIntent. Keeping them out of hasApproval
+  // means a sentence like "do not proceed firewall" won't false-positive as an
+  // approval just because it contains "proceed".
+  const hasApproval = /\b(yes|yep|approved|approve|ok|okay)\b/.test(normalized);
   const hasProceedIntent = /\b(continue|proceed|summari[sz]e|process|use|go ahead)\b/.test(normalized);
   const hasFirewallReference = /\b(firewall|flagged|malicious|silmaril|security result|warning)\b/.test(normalized);
   return hasApproval && hasProceedIntent && hasFirewallReference;

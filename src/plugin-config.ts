@@ -5,6 +5,7 @@ export type ParsedPluginConfig = {
   silmarilApiKey?: string;
   apiUrl?: string;
   userEmail?: string;
+  rolePolicyEndpoint?: string;
   falsePositiveReportUrl?: string;
   falsePositiveReportApiKey?: string;
   enableWebFetchWrapper: boolean;
@@ -45,6 +46,7 @@ export function parsePluginConfig(raw: unknown, logger?: Logger): ParsedPluginCo
     silmarilApiKey,
     apiUrl,
     userEmail: readString(record.userEmail) ?? readString(record.USER_EMAIL),
+    rolePolicyEndpoint: readString(record.rolePolicyEndpoint),
     falsePositiveReportUrl: readString(record.falsePositiveReportUrl),
     falsePositiveReportApiKey: readString(record.falsePositiveReportApiKey),
     enableWebFetchWrapper: record.enableWebFetchWrapper === true,

@@ -64,6 +64,24 @@ test("parsePluginConfig applies partial GitHub and Gmail wrapper defaults", () =
   assert.equal(config.enableGmailWrappers.thread, true);
 });
 
+test("parsePluginConfig parses rolePolicyEndpoint when present", () => {
+  const config = parsePluginConfig({
+    apiKey: "key",
+    apiUrl: "url",
+    rolePolicyEndpoint: "https://policy.example/role",
+  });
+
+  assert.equal(config.rolePolicyEndpoint, "https://policy.example/role");
+});
+
+test("parsePluginConfig leaves rolePolicyEndpoint undefined when absent or invalid", () => {
+  const a = parsePluginConfig({ apiKey: "k", apiUrl: "u" });
+  assert.equal(a.rolePolicyEndpoint, undefined);
+
+  const b = parsePluginConfig({ apiKey: "k", apiUrl: "u", rolePolicyEndpoint: 42 });
+  assert.equal(b.rolePolicyEndpoint, undefined);
+});
+
 test("parsePluginConfig parses complete Google config", () => {
   const config = parsePluginConfig({
     apiKey: "key",

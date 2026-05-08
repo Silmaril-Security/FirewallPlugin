@@ -85,7 +85,7 @@
     },
     "rolePolicyEndpoint": {
       "label": "Role Policy Endpoint",
-      "help": "HTTP endpoint that returns a role-based policy action (warn or block) for the resolved userEmail. Reserved for a future release; the plugin currently uses a hardcoded policy client."
+      "help": "HTTP endpoint that returns a role-based policy action (warn or block) for the resolved userEmail. When set, the plugin uses this endpoint instead of the built-in hardcoded admin list."
     },
     "llmFalsePositiveReviewThreshold": {
       "label": "LLM False Positive Review Threshold",
