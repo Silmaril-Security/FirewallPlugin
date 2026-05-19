@@ -2,3 +2,4 @@ node_modules/
 .manual/
 test/
 .claude/
+*.tgz

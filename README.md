@@ -4,8 +4,8 @@ Silmaril classification for OpenClaw plugin hooks.
 
 The plugin observes OpenClaw prompt, tool-call, and tool-result hook payloads,
 sends them to a Silmaril classify endpoint, and logs the returned prediction and
-score. Runtime behavior is fail-open: classifier errors and sync-worker failures
-are logged, then OpenClaw execution continues.
+score. Runtime behavior is fail-open: classifier errors are logged, then
+OpenClaw execution continues.
 
 ## Runtime Hooks
 
@@ -15,11 +15,10 @@ are logged, then OpenClaw execution continues.
 | `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
 
-`before_prompt_build` and `before_tool_call` call the Silmaril SDK directly.
-`tool_result_persist` is handled through
-`scripts/firewall-classify-worker.mjs`, a short-lived Node worker. The worker
-lets the plugin classify persisted tool output while keeping the hook handler
-synchronous.
+`before_prompt_build` and `before_tool_call` await the Silmaril SDK directly.
+`tool_result_persist` is a synchronous OpenClaw hook, so the plugin starts a
+fail-open classification request and returns immediately. The result is logged
+when the classifier call completes.
 
 ## Files
 
@@ -28,16 +27,24 @@ synchronous.
 | `index.ts` | OpenClaw plugin entrypoint and hook registration |
 | `openclaw.plugin.json` | Plugin metadata and config schema |
 | `package.json` | Package metadata, dependency list, and OpenClaw extension metadata |
-| `scripts/firewall-classify-worker.mjs` | Synchronous classification worker for `tool_result_persist` |
+| `scripts/build.mjs` | Builds `dist/index.js` for CLI plugin installation |
 | `scripts/mock-silmaril-classifier.mjs` | Local classifier stub for manual smoke testing |
+| `dist/index.js` | Built plugin entrypoint used by OpenClaw's CLI install path |
 
-## Configuration
+## Source Checkout Configuration
 
-Add the plugin entry to `~/.openclaw/openclaw.json`:
+Register this source checkout directly in `~/.openclaw/openclaw.json`. Preserve
+the rest of the user's OpenClaw config and add the absolute repository path to
+`plugins.load.paths`:
 
 ```json
 {
   "plugins": {
+    "load": {
+      "paths": [
+        "/absolute/path/to/FirewallPlugin"
+      ]
+    },
     "entries": {
       "firewall-plugin": {
         "enabled": true,
@@ -46,7 +53,10 @@ Add the plugin entry to `~/.openclaw/openclaw.json`:
           "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify"
         }
       }
-    }
+    },
+    "allow": [
+      "firewall-plugin"
+    ]
   }
 }
 ```
@@ -81,14 +91,48 @@ are `true`, `1`, `yes`, and `on`.
 
 ## Install
 
-From the repository root:
+This repository supports direct source loading and two CLI install styles.
+
+For the source checkout flow, use the `plugins.load.paths` configuration above.
+The repository ships a built `dist/index.js`, so a fresh checkout can be loaded
+directly. Install dependencies before starting OpenClaw, and rebuild after
+editing `index.ts`:
 
 ```sh
 npm install
+npm run build
+openclaw gateway restart
+```
+
+For OpenClaw's linked local plugin install path, build the package and install
+it from the repository root:
+
+```sh
+npm install
+npm run build
 openclaw plugins install -l .
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
+
+For a clean installable archive, build and pack the plugin, then install the
+generated tarball:
+
+```sh
+npm install
+npm run build
+npm pack
+openclaw plugins install ./silmaril-firewall-plugin-1.0.0.tgz
+openclaw plugins enable firewall-plugin
+openclaw gateway restart
+```
+
+Use `plugins.load.paths` when you want OpenClaw to load this checkout directly.
+Use `openclaw plugins install -l .` when you want OpenClaw to register this
+checkout as a linked local plugin. Use the `.tgz` flow when you want the
+installer to consume only the packaged files listed by `package.json`. All flows
+use the same plugin id, `firewall-plugin`, and the same
+`plugins.entries.firewall-plugin.config` settings.
 
 Inspect the installed plugin:
 
@@ -136,8 +180,8 @@ Check the gateway logs for the install confirmation and classification entries:
 firewall-plugin: installed
 [firewall] before_prompt_build result:
 [firewall] before_tool_call result:
-[firewall] tool_result_persist sync classify begin
-[firewall] tool_result_persist sync result:
+[firewall] tool_result_persist classify begin
+[firewall] tool_result_persist result:
 ```
 
 The mock classifier writes captured requests to the path printed on startup.
