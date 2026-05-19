@@ -1,7 +1,7 @@
 {
   "id": "firewall-plugin",
   "name": "Firewall Plugin",
-  "description": "Adds a firewall to OpenClaw",
+  "description": "Classifies OpenClaw prompts, tool calls, and persisted tool results through Silmaril hooks. It does not register wrapper tools or web fetch providers.",
   "configSchema": {
     "type": "object",
     "additionalProperties": true,
