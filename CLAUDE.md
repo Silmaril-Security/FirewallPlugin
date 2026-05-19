@@ -1,7 +1,7 @@
 # Claude Code Onboarding Notes
 
 This repository is an OpenClaw plugin. Use this file when onboarding the plugin
-into a fresh OpenClaw setup.
+into an OpenClaw setup.
 
 ## Operating Boundary
 
@@ -173,5 +173,5 @@ If installation or verification fails, collect:
 - relevant `openclaw --no-color plugins doctor` output
 - relevant gateway log lines
 
-Then report the failure and propose a fix. Do not patch plugin code or OpenClaw
+Do not patch plugin code or OpenClaw
 core files during onboarding.
