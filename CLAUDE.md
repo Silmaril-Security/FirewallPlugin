@@ -44,11 +44,17 @@ OpenClaw runtime entrypoint: `dist/index.js`
 
 Runtime behavior:
 
+- the manifest declares Gateway startup activation for OpenClaw hook capability
+  loading
+- `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
+  startup hooks
 - `before_prompt_build` sends user prompt text as `USER_INPUT`
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes
+- hook registration is unconditional; classifier config is resolved when each
+  hook runs
 - shadow mode defaults to on: unset `SILMARIL_FIREWALL_SHADOW_MODE` behaves the
   same as `SILMARIL_FIREWALL_SHADOW_MODE=true`
 - with shadow mode on, hook classifications are logged but do not change model
@@ -66,6 +72,13 @@ Configuration fields:
 
 - `apiKey`: Silmaril API key
 - `apiUrl`: full Silmaril classify endpoint URL, ending in `/classify`
+- `timeoutMs`: optional classifier timeout in milliseconds; default `2500`
+- `toolResultMaxInFlight`: optional asynchronous tool-result classification
+  concurrency limit; default `8`
+
+Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
+OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
+that setting blocks the hook registration.
 
 ## Fresh OpenClaw Setup
 
@@ -146,7 +159,9 @@ for direct source loading or the CLI install path is unavailable.
            "enabled": true,
            "config": {
              "apiKey": "<SILMARIL_API_KEY>",
-             "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify"
+             "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify",
+             "timeoutMs": 2500,
+             "toolResultMaxInFlight": 8
            }
          }
        },
@@ -199,7 +214,7 @@ for direct source loading or the CLI install path is unavailable.
 10. Verify plugin load:
 
    ```sh
-   openclaw --no-color plugins inspect firewall-plugin
+   openclaw --no-color plugins inspect firewall-plugin --runtime
    openclaw --no-color plugins doctor
    openclaw --no-color gateway status
    ```
@@ -211,6 +226,7 @@ for direct source loading or the CLI install path is unavailable.
    Format: openclaw
    Shape: hook-only
    Typed hooks:
+   gateway_start
    before_prompt_build
    before_tool_call
    tool_result_persist

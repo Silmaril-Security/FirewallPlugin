@@ -7,18 +7,28 @@ sends them to a Silmaril classify endpoint, and logs the returned prediction and
 score. Runtime behavior is fail-open: classifier errors are logged, then
 OpenClaw execution continues.
 
+The plugin targets OpenClaw plugin API `2026.5.18` and newer. Its manifest
+declares startup activation for hook capability loading, and the runtime entry
+registers typed Gateway hooks with `api.on(...)`.
+
 ## Runtime Hooks
 
 | OpenClaw hook | Silmaril label | Classified content |
 |---|---|---|
+| `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
 | `before_prompt_build` | `USER_INPUT` | User prompt text |
 | `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
 
-`before_prompt_build` and `before_tool_call` await the Silmaril SDK directly.
-`tool_result_persist` is a synchronous OpenClaw hook, so the plugin starts a
-fail-open classification request and returns immediately. The result is logged
-when the classifier call completes.
+Hook registration is unconditional, so OpenClaw can discover and invoke the
+Gateway hooks even before classifier settings are validated. Classifier config
+is resolved inside each hook call.
+
+`before_prompt_build` and `before_tool_call` await the Silmaril SDK directly
+with a plugin-owned timeout. `tool_result_persist` is a synchronous OpenClaw
+hook, so the plugin starts a bounded fail-open classification request and
+returns immediately. The result is logged when the classifier call completes.
+Image-only and other empty tool results are skipped.
 
 ## Files
 
@@ -50,7 +60,9 @@ the rest of the user's OpenClaw config and add the absolute repository path to
         "enabled": true,
         "config": {
           "apiKey": "your-silmaril-api-key",
-          "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify"
+          "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify",
+          "timeoutMs": 2500,
+          "toolResultMaxInFlight": 8
         }
       }
     },
@@ -62,7 +74,15 @@ the rest of the user's OpenClaw config and add the absolute repository path to
 ```
 
 `apiUrl` should be the full classify endpoint URL. The plugin reads both values
-from `api.pluginConfig` during registration.
+from OpenClaw plugin config during hook execution.
+
+`timeoutMs` and `toolResultMaxInFlight` are optional. `timeoutMs` defaults to
+`2500` and bounds each classifier request. `toolResultMaxInFlight` defaults to
+`8` and bounds asynchronous `tool_result_persist` classifications.
+
+Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
+OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
+that setting blocks the hook registration.
 
 ## Shadow Mode
 
@@ -152,7 +172,7 @@ use the same plugin id, `firewall-plugin`, and the same
 Inspect the installed plugin:
 
 ```sh
-openclaw --no-color plugins inspect firewall-plugin
+openclaw --no-color plugins inspect firewall-plugin --runtime
 ```
 
 Expected shape:
@@ -162,6 +182,7 @@ Status: loaded
 Format: openclaw
 Shape: hook-only
 Typed hooks:
+gateway_start
 before_prompt_build
 before_tool_call
 tool_result_persist
