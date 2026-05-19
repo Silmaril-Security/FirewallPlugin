@@ -93,6 +93,21 @@ are `true`, `1`, `yes`, and `on`.
 
 This repository supports direct source loading and two CLI install styles.
 
+OpenClaw does not automatically discover or pull this repository by plugin id.
+Start by cloning the repository onto the machine where OpenClaw runs:
+
+```sh
+git clone https://github.com/Silmaril-Security/FirewallPlugin.git
+cd FirewallPlugin
+git checkout simplified-dev
+```
+
+The `package.json` metadata tells OpenClaw how to load the plugin after it has
+access to the package. It does not publish or advertise a download location. To
+install by package name, such as `openclaw plugins install
+@silmaril/firewall-plugin`, the package must first be published to an npm
+registry that the machine can access.
+
 For the source checkout flow, use the `plugins.load.paths` configuration above.
 The repository ships a built `dist/index.js`, so a fresh checkout can be loaded
 directly. Install dependencies before starting OpenClaw, and rebuild after

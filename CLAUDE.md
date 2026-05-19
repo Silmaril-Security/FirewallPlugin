@@ -16,8 +16,8 @@ Allowed onboarding changes:
 - clone or update this repository
 - register this source checkout through `plugins.load.paths` in the user's
   OpenClaw config
-- install this repository through `openclaw plugins install` when the user wants
-  the CLI-managed plugin package flow
+- install this repository through `openclaw plugins install -l .`; this is the
+  default Claude Code onboarding path
 - create an npm package tarball with `npm pack` when the user wants a clean
   installable archive
 - add or update the `firewall-plugin` entry in the user's OpenClaw config
@@ -72,6 +72,11 @@ Configuration fields:
 Use these steps when OpenClaw is not already configured and this repository is
 not already cloned.
 
+Default install rule for Claude Code: after cloning and building this repository,
+run `openclaw plugins install -l .` from the repository root. Do not choose the
+manual `plugins.load.paths` source checkout flow unless the user explicitly asks
+for direct source loading or the CLI install path is unavailable.
+
 1. Verify prerequisites:
 
    ```sh
@@ -113,19 +118,29 @@ not already cloned.
    npm run build
    ```
 
-6. Choose the install style.
+6. Install the plugin with OpenClaw's linked local plugin flow.
 
-   Source checkout flow: register the checkout and plugin config in the user's
-   OpenClaw config:
+   Run these commands from the repository root. This is the normal onboarding
+   path for Claude Code:
+
+   ```sh
+   openclaw plugins install -l .
+   openclaw plugins enable firewall-plugin
+   ```
+
+   The `-l` flag links the local checkout instead of copying it. OpenClaw reads
+   this repository's `package.json`, then loads the built entrypoint at
+   `dist/index.js`.
+
+7. Add or update the plugin config in the user's OpenClaw config.
+
+   Preserve unrelated OpenClaw config. Do not hand-edit
+   `plugins.installs`. Add `firewall-plugin` to `plugins.allow` when that list
+   exists, and add or update `plugins.entries.firewall-plugin.config`:
 
    ```json
    {
      "plugins": {
-       "load": {
-         "paths": [
-           "/absolute/path/to/FirewallPlugin"
-         ]
-       },
        "entries": {
          "firewall-plugin": {
            "enabled": true,
@@ -142,16 +157,24 @@ not already cloned.
    }
    ```
 
-   Preserve unrelated OpenClaw config. Add the absolute repository path to
-   `plugins.load.paths`, add `firewall-plugin` to `plugins.allow` when that list
-   exists, and add or update `plugins.entries.firewall-plugin`.
+8. Alternative install flows.
 
-   CLI-managed linked plugin flow: install the built plugin from the repository
-   root, then enable it:
+   Use these only when the user explicitly asks for a different install style or
+   when `openclaw plugins install -l .` is unavailable.
 
-   ```sh
-   openclaw plugins install -l .
-   openclaw plugins enable firewall-plugin
+   Direct source checkout flow: register the checkout through
+   `plugins.load.paths` instead of using the CLI install command.
+
+   ```json
+   {
+     "plugins": {
+       "load": {
+         "paths": [
+           "/absolute/path/to/FirewallPlugin"
+         ]
+       }
+     }
+   }
    ```
 
    Clean archive flow: pack the plugin and install the generated tarball:
@@ -167,13 +190,13 @@ not already cloned.
    Do not remove an existing source checkout registration unless the user
    explicitly asks to switch install styles.
 
-7. Restart the gateway:
+9. Restart the gateway:
 
    ```sh
    openclaw gateway restart
    ```
 
-8. Verify plugin load:
+10. Verify plugin load:
 
    ```sh
    openclaw --no-color plugins inspect firewall-plugin
@@ -193,7 +216,7 @@ not already cloned.
    tool_result_persist
    ```
 
-9. Run a manual smoke test:
+11. Run a manual smoke test:
 
     ```sh
     openclaw agent --agent main --message "Reply with FIREWALL_PLUGIN_SMOKE_OK."
