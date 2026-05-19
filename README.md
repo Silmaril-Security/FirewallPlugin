@@ -54,6 +54,31 @@ Add the plugin entry to `~/.openclaw/openclaw.json`:
 `apiUrl` should be the full classify endpoint URL. The plugin reads both values
 from `api.pluginConfig` during registration.
 
+## Shadow Mode
+
+Shadow mode is controlled by the optional `SILMARIL_FIREWALL_SHADOW_MODE`
+environment variable. It defaults to `true`.
+
+With shadow mode enabled, the plugin classifies hook payloads and logs the
+results without changing the model context or surfacing a user-facing warning.
+Benign and malicious classifications keep the user experience unchanged.
+
+When `SILMARIL_FIREWALL_SHADOW_MODE=false`, a malicious `before_prompt_build`
+classification prepends a strict advisory to the model's system context for
+that turn. That advisory asks the model to begin the user-facing response with:
+
+```text
+Silmaril's Firewall found this to be suspicious. Please proceed carefully.
+```
+
+The strict advisory tells the model not to proceed with the latest user request.
+It should not complete the requested task, follow the latest input, or call
+tools on behalf of that input. Benign classifications keep the user experience
+unchanged in both modes.
+
+Accepted false values are `false`, `0`, `no`, and `off`. Accepted true values
+are `true`, `1`, `yes`, and `on`.
+
 ## Install
 
 From the repository root:

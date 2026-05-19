@@ -39,6 +39,17 @@ Runtime behavior:
 - `before_prompt_build` sends user prompt text as `USER_INPUT`
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `tool_result_persist` sends persisted tool result text as `TOOL_RESPONSE`
+- shadow mode defaults to on: unset `SILMARIL_FIREWALL_SHADOW_MODE` behaves the
+  same as `SILMARIL_FIREWALL_SHADOW_MODE=true`
+- with shadow mode on, hook classifications are logged but do not change model
+  context or surface a user-facing warning
+- `SILMARIL_FIREWALL_SHADOW_MODE=false` prepends a strict advisory for malicious
+  `before_prompt_build` classifications:
+  the model is told not to proceed with the latest user request, not to complete
+  the task, and not to call tools on behalf of that input
+- the non-shadow advisory asks the user-facing response to begin with
+  `Silmaril's Firewall found this to be suspicious. Please proceed carefully.`
+- benign `before_prompt_build` classifications do not prepend context
 - classifier errors and sync-worker failures fail open
 
 Configuration fields:
