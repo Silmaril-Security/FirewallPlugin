@@ -19,9 +19,7 @@ export default definePluginEntry({
     }
 
     const firewall = new Firewall({ apiKey, apiUrl });
-    api.logger.info(
-      "firewall-plugin: hook-only mode enabled; no wrapper tools or web fetch providers are registered",
-    );
+    api.logger.info("firewall-plugin: installed");
 
     api.on("before_prompt_build", async (event) => {
       if (typeof event?.prompt !== "string") return;

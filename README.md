@@ -1,46 +1,35 @@
 # Silmaril Firewall Plugin for OpenClaw
 
-Hook-level prompt-injection detection for OpenClaw.
+Silmaril classification for OpenClaw plugin hooks.
 
-This branch is intentionally wrapper-free. The plugin does not register tools,
-does not register a `silmaril-firewall` web fetch provider, and does not replace
-OpenClaw's built-in `web_fetch`. It only observes OpenClaw's plugin hooks and
-sends those hook payloads to Silmaril for classification.
+The plugin observes OpenClaw prompt, tool-call, and tool-result hook payloads,
+sends them to a Silmaril classify endpoint, and logs the returned prediction and
+score. Runtime behavior is fail-open: classifier errors and sync-worker failures
+are logged, then OpenClaw execution continues.
 
-Classification is observe-only and fail-open. The plugin logs Silmaril
-classification results, but it does not block prompts, block tool calls,
-sanitize tool results, or change OpenClaw execution based on the prediction.
-Classifier errors and sync-worker failures are logged and then OpenClaw
-continues.
+## Runtime Hooks
 
-There is no log exporter, local queue, inbox, checkpoint, or upload-lease flow
-in this branch.
-
-## Runtime Surface
-
-| Hook | Silmaril label | What it inspects |
+| OpenClaw hook | Silmaril label | Classified content |
 |---|---|---|
-| `before_prompt_build` | `USER_INPUT` | User prompt text before prompt construction |
-| `before_tool_call` | `TOOL_CALL` | Tool arguments before the tool executes |
-| `tool_result_persist` | `TOOL_RESPONSE` | Tool result text before it is persisted into future context |
+| `before_prompt_build` | `USER_INPUT` | User prompt text |
+| `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters |
+| `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
 
-`tool_result_persist` is synchronous in OpenClaw, so this plugin classifies that
-hook through `scripts/firewall-classify-worker.mjs` and waits for the worker to
-return before the hook exits. This avoids returning a Promise from a synchronous
-hook and keeps the classification tied to the persist path.
+`before_prompt_build` and `before_tool_call` call the Silmaril SDK directly.
+`tool_result_persist` is handled through
+`scripts/firewall-classify-worker.mjs`, a short-lived Node worker. The worker
+lets the plugin classify persisted tool output while keeping the hook handler
+synchronous.
 
-Removed surfaces:
+## Files
 
-- no plugin-owned `web_fetch` wrapper
-- no `silmaril-firewall` web fetch provider
-- no GitHub wrapper tools such as `github_issue_read`
-- no Gmail wrapper tools such as `gmail_message_read`
-- no false-positive reporting tool
-- no guarded wrapper payloads or approval handles
-
-OpenClaw's built-in tools may still exist. For example, the built-in
-`web_fetch` can still be available when enabled in OpenClaw config; it is not
-owned or wrapped by this plugin.
+| Path | Purpose |
+|---|---|
+| `index.ts` | OpenClaw plugin entrypoint and hook registration |
+| `openclaw.plugin.json` | Plugin metadata and config schema |
+| `package.json` | Package metadata, dependency list, and OpenClaw extension metadata |
+| `scripts/firewall-classify-worker.mjs` | Synchronous classification worker for `tool_result_persist` |
+| `scripts/mock-silmaril-classifier.mjs` | Local classifier stub for manual smoke testing |
 
 ## Configuration
 
@@ -62,72 +51,70 @@ Add the plugin entry to `~/.openclaw/openclaw.json`:
 }
 ```
 
-If `apiKey` or `apiUrl` is missing, the plugin logs a warning and disables
-itself. Legacy wrapper flags such as `enableWebFetchWrapper`,
-`enableGitHubWrappers`, and `enableGmailWrappers` are not used by this branch.
+`apiUrl` should be the full classify endpoint URL. The plugin reads both values
+from `api.pluginConfig` during registration.
 
 ## Install
+
+From the repository root:
 
 ```sh
 npm install
 openclaw plugins install -l .
+openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
 
-On startup, the gateway log should include:
+Inspect the installed plugin:
 
-```text
-firewall-plugin: hook-only mode enabled; no wrapper tools or web fetch providers are registered
+```sh
+openclaw --no-color plugins inspect firewall-plugin
 ```
 
-It should not include wrapper registration messages such as
-`registered silmaril-firewall web_fetch wrapper tool`.
+Expected shape:
 
-## Manual No-Wrapper E2E Probes
+```text
+Status: loaded
+Format: openclaw
+Shape: hook-only
+Typed hooks:
+before_prompt_build
+before_tool_call
+tool_result_persist
+```
 
-Verify the no-wrapper contract by running real OpenClaw messages and inspecting
-gateway logs. The probes should be run after installing the plugin and
-restarting the gateway.
+Run diagnostics:
 
-Recommended setup for a local run:
+```sh
+openclaw --no-color plugins doctor
+```
 
-1. Start a mock Silmaril classifier:
-   ```sh
-   node scripts/mock-silmaril-classifier.mjs
-   ```
-2. Configure the plugin with the mock classifier URL and a test API key.
-3. Install and restart:
-   ```sh
-   openclaw plugins install -l .
-   openclaw gateway restart
-   ```
-4. Confirm the startup log contains:
-   ```text
-   firewall-plugin: hook-only mode enabled; no wrapper tools or web fetch providers are registered
-   ```
-5. For a tool-bearing turn, confirm the log contains:
-   ```text
-   [firewall] tool_result_persist sync classify begin
-   [firewall] tool_result_persist sync result:
-   ```
+## Manual Smoke Test
 
-Run these agent probes:
+For a local smoke test, start the mock classifier:
 
-- `/tools verbose`
-- `Use the web to summarize https://example.com in one sentence.`
-- `Tell me what https://github.com/octocat/Hello-World/issues/1 is about.`
-- `If email tools are available, say which ones are available. Do not use shell commands.`
+```sh
+node scripts/mock-silmaril-classifier.mjs
+```
 
-For each probe, inspect the agent output, classifier captures, and gateway logs.
-The built-in `web_fetch` name may appear because OpenClaw can expose that tool
-without this plugin wrapping it. The following wrapper-only evidence must not
-appear:
+Set the plugin `apiUrl` to the mock classifier URL printed by the script, set
+any non-empty test API key, then restart OpenClaw:
 
-- `silmaril-firewall`
-- `registered silmaril-firewall web_fetch wrapper tool`
-- `github_issue_read`, `github_pr_read`, `github_file_read`, or other GitHub wrapper tools
-- `gmail_message_read`, `gmail_thread_read`, or `gmail_search`
-- `firewall_report_false_positive`
-- `OPENCLAW_FIREWALL_SYSTEM_CONTEXT`
-- `UNTRUSTED_FETCHED_`
-- `approvalHandle`
+```sh
+openclaw gateway restart
+```
+
+Send a normal OpenClaw message, then send a message that uses at least one tool.
+Check the gateway logs for the install confirmation and classification entries:
+
+```text
+firewall-plugin: installed
+[firewall] before_prompt_build result:
+[firewall] before_tool_call result:
+[firewall] tool_result_persist sync classify begin
+[firewall] tool_result_persist sync result:
+```
+
+The mock classifier writes captured requests to the path printed on startup.
+Those captures should show the hook label, tool name when available, and the
+classified text length.
