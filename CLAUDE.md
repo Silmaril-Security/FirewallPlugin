@@ -49,6 +49,8 @@ Runtime behavior:
 - `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
   startup hooks
 - `before_prompt_build` sends user prompt text as `USER_INPUT`
+- `before_message_write` consumes a cached user-input risk record for the
+  matching assistant message after inference
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
@@ -57,15 +59,20 @@ Runtime behavior:
   hook runs
 - shadow mode defaults to on: unset `SILMARIL_FIREWALL_SHADOW_MODE` behaves the
   same as `SILMARIL_FIREWALL_SHADOW_MODE=true`
-- with shadow mode on, hook classifications are logged but do not change model
-  context or surface a user-facing warning
-- `SILMARIL_FIREWALL_SHADOW_MODE=false` prepends a strict advisory for malicious
-  `before_prompt_build` classifications:
-  the model is told not to proceed with the latest user request, not to complete
-  the task, and not to call tools on behalf of that input
-- the non-shadow advisory asks the user-facing response to begin with
-  `Silmaril's Firewall found this to be suspicious. Please proceed carefully.`
-- benign `before_prompt_build` classifications do not prepend context
+- malicious `before_prompt_build` classifications are cached as short-lived
+  in-memory risk records instead of being added to model context or assistant
+  output
+- cached risk records use exact keys when available (`runId`, `traceId`,
+  `idempotencyKey`, and scoped run combinations), plus an
+  `agentId`/`sessionKey` FIFO fallback for current `before_message_write`
+  contexts that do not expose `runId`; TTL and the global record cap bound
+  memory
+- `before_message_write` consumes the matching cached risk record and logs the
+  cache consumption; it does not mutate the assistant message
+- no warning, stub, prompt, system, or developer context is added in either mode
+- `SILMARIL_FIREWALL_SHADOW_MODE` is parsed only for startup logging; when it
+  is enabled, `gateway_start` logs `firewall-plugin: Silmaril is in shadow mode`
+- benign `before_prompt_build` classifications do not populate the risk cache
 - classifier errors fail open
 
 Configuration fields:
@@ -149,7 +156,7 @@ for direct source loading or the CLI install path is unavailable.
 
    Preserve unrelated OpenClaw config. Do not hand-edit
    `plugins.installs`. Add `firewall-plugin` to `plugins.allow` when that list
-   exists, and add or update `plugins.entries.firewall-plugin.config`:
+   exists, and add or update the `plugins.entries.firewall-plugin` entry:
 
    ```json
    {
@@ -228,6 +235,7 @@ for direct source loading or the CLI install path is unavailable.
    Typed hooks:
    gateway_start
    before_prompt_build
+   before_message_write
    before_tool_call
    tool_result_persist
    ```
@@ -244,7 +252,10 @@ for direct source loading or the CLI install path is unavailable.
 
     ```text
     firewall-plugin: installed
+    firewall-plugin: Silmaril is in shadow mode
     [firewall] before_prompt_build result:
+    [firewall] before_prompt_build risk cached:
+    [firewall] before_message_write risk cache consumed:
     [firewall] before_tool_call result:
     [firewall] tool_result_persist classify begin
     [firewall] tool_result_persist result:

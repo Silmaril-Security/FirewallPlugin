@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "test": "node scripts/run-unit-tests.mjs",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "prepack": "npm run build"
   },
   "files": [

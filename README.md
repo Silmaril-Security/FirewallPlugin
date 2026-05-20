@@ -17,6 +17,7 @@ registers typed Gateway hooks with `api.on(...)`.
 |---|---|---|
 | `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
 | `before_prompt_build` | `USER_INPUT` | User prompt text |
+| `before_message_write` | n/a | Consumes a cached user-input risk record for the matching assistant message |
 | `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
 
@@ -25,10 +26,12 @@ Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
 `before_prompt_build` and `before_tool_call` await the Silmaril SDK directly
-with a plugin-owned timeout. `tool_result_persist` is a synchronous OpenClaw
-hook, so the plugin starts a bounded fail-open classification request and
-returns immediately. The result is logged when the classifier call completes.
-Image-only and other empty tool results are skipped.
+with a plugin-owned timeout. `before_message_write` is synchronous and does not
+classify; it only consumes a cached prompt-risk record for the matching
+assistant message. `tool_result_persist` is a synchronous
+OpenClaw hook, so the plugin starts a bounded fail-open classification request
+and returns immediately. The result is logged when the classifier call
+completes. Image-only and other empty tool results are skipped.
 
 ## Files
 
@@ -89,22 +92,24 @@ that setting blocks the hook registration.
 Shadow mode is controlled by the optional `SILMARIL_FIREWALL_SHADOW_MODE`
 environment variable. It defaults to `true`.
 
-With shadow mode enabled, the plugin classifies hook payloads and logs the
-results without changing the model context or surfacing a user-facing warning.
-Benign and malicious classifications keep the user experience unchanged.
+Both shadow-mode values classify hook payloads, cache malicious user-input
+records, and consume matching cache records without changing model context or
+assistant output. For a malicious `before_prompt_build` result, the plugin
+stores a short-lived in-memory risk record keyed by the strongest available
+correlation fields: `runId`, `traceId`, `idempotencyKey`, `agentId`,
+`sessionKey`, prompt hash, timestamp, and a random record id. Current OpenClaw
+`before_message_write` contexts commonly expose only `agentId` and `sessionKey`,
+so the plugin uses exact keys when available and a FIFO fallback otherwise. The
+fallback is bounded by the global TTL and record cap.
 
-When `SILMARIL_FIREWALL_SHADOW_MODE=false`, a malicious `before_prompt_build`
-classification prepends a strict advisory to the model's system context for
-that turn. That advisory asks the model to begin the user-facing response with:
+When shadow mode is enabled, gateway startup logs:
 
 ```text
-Silmaril's Firewall found this to be suspicious. Please proceed carefully.
+firewall-plugin: Silmaril is in shadow mode
 ```
 
-The strict advisory tells the model not to proceed with the latest user request.
-It should not complete the requested task, follow the latest input, or call
-tools on behalf of that input. Benign classifications keep the user experience
-unchanged in both modes.
+The plugin does not add warnings, stubs, prompt, system, or developer context
+in either mode. Benign classifications keep the user experience unchanged.
 
 Accepted false values are `false`, `0`, `no`, and `off`. Accepted true values
 are `true`, `1`, `yes`, and `on`.
@@ -184,6 +189,7 @@ Shape: hook-only
 Typed hooks:
 gateway_start
 before_prompt_build
+before_message_write
 before_tool_call
 tool_result_persist
 ```
@@ -214,7 +220,10 @@ Check the gateway logs for the install confirmation and classification entries:
 
 ```text
 firewall-plugin: installed
+firewall-plugin: Silmaril is in shadow mode
 [firewall] before_prompt_build result:
+[firewall] before_prompt_build risk cached:
+[firewall] before_message_write risk cache consumed:
 [firewall] before_tool_call result:
 [firewall] tool_result_persist classify begin
 [firewall] tool_result_persist result:
