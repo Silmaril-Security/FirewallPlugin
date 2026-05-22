@@ -127,7 +127,6 @@ Start by cloning the repository onto the machine where OpenClaw runs:
 ```sh
 git clone https://github.com/Silmaril-Security/FirewallPlugin.git
 cd FirewallPlugin
-git checkout simplified-dev
 ```
 
 The `package.json` metadata tells OpenClaw how to load the plugin after it has

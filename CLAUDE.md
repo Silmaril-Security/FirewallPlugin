@@ -125,12 +125,11 @@ for direct source loading or the CLI install path is unavailable.
    provider, and credentials. Keep provider credentials in OpenClaw's config or
    secrets storage; do not write secrets into this repository.
 
-4. Clone this repository and select the simplified branch:
+4. Clone this repository:
 
    ```sh
    git clone https://github.com/Silmaril-Security/FirewallPlugin.git
    cd FirewallPlugin
-   git checkout simplified-dev
    ```
 
 5. Install repository dependencies:

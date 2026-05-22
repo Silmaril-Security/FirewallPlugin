@@ -438,6 +438,19 @@ tests:
       - "Duplicate key \"devDependencies\""
     expected_build_output: "No duplicate-object-key warning from esbuild."
 
+  - id: e2e-001b-install-docs-default-branch
+    length: short
+    purpose: Install docs clone the release branch path without pinning the feature branch after merge.
+    execution:
+      - "Inspect README.md and CLAUDE.md install commands."
+      - "Confirm the default clone flow is git clone followed by cd FirewallPlugin."
+    expected_readme_install_flow:
+      - "git clone https://github.com/Silmaril-Security/FirewallPlugin.git"
+      - "cd FirewallPlugin"
+    expected_forbidden_docs:
+      - "git checkout simplified-dev"
+      - "select the simplified branch"
+
   - id: e2e-002-tools-verbose-no-wrappers
     length: short
     purpose: Verify visible OpenClaw tool list has no plugin wrapper tools.
