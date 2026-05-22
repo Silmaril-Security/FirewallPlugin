@@ -1,11 +1,10 @@
 {
   "id": "firewall-plugin",
   "name": "Firewall Plugin",
-  "description": "Adds a firewall to OpenClaw",
-  "skills": ["skills"],
-  "contracts": {
-    "webFetchProviders": ["silmaril-firewall"],
-    "tools": ["web_fetch", "firewall_report_false_positive"]
+  "description": "Classifies OpenClaw prompts, tool calls, and persisted tool results through Silmaril hooks. It does not register wrapper tools or web fetch providers.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["hook"]
   },
   "configSchema": {
     "type": "object",
@@ -14,18 +13,25 @@
       "apiKey": { "type": "string" },
       "silmarilApiKey": { "type": "string" },
       "apiUrl": { "type": "string" },
-      "falsePositiveReportUrl": { "type": "string" },
-      "enableWebFetchWrapper": { "type": "boolean" }
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 250,
+        "maximum": 10000,
+        "default": 2500
+      },
+      "toolResultMaxInFlight": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 64,
+        "default": 8
+      }
     }
   },
   "uiHints": {
     "apiKey": { "label": "API Key", "sensitive": true },
     "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
     "apiUrl": { "label": "API URL" },
-    "falsePositiveReportUrl": { "label": "False Positive Report URL" },
-    "enableWebFetchWrapper": {
-      "label": "Enable Web Fetch Wrapper",
-      "help": "Register a plugin-owned web_fetch tool that fetches pages through Silmaril before content reaches the model."
-    }
+    "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
+    "toolResultMaxInFlight": { "label": "Tool result max in flight", "advanced": true }
   }
 }

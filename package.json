@@ -3,28 +3,35 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "manual:fp:webhook": "node scripts/manual-fp-webhook.mjs serve",
-    "manual:fp:captures": "node scripts/manual-fp-webhook.mjs captures",
-    "manual:fp:clear": "node scripts/manual-fp-webhook.mjs clear",
-    "test": "node --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\""
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/run-unit-tests.mjs",
+    "test:unit": "node scripts/run-unit-tests.mjs",
+    "prepack": "npm run build"
   },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "CLAUDE.md"
+  ],
   "dependencies": {
     "@silmaril-security/sdk": "0.1.3"
   },
   "devDependencies": {
+    "esbuild": "^0.28.0",
     "tsx": "^4.20.6"
   },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.5.18",
+      "minGatewayVersion": "2026.5.18"
     },
     "build": {
-      "openclawVersion": "2026.3.24-beta.2",
-      "pluginSdkVersion": "2026.3.24-beta.2"
+      "openclawVersion": "2026.5.18",
+      "pluginSdkVersion": "2026.5.18"
     }
   }
 }

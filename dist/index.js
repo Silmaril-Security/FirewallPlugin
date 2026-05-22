@@ -1,65 +1,15 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
 import { createHash, randomUUID } from "node:crypto";
-
 const SHADOW_MODE_ENV = "SILMARIL_FIREWALL_SHADOW_MODE";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
-const MAX_CLASSIFY_TIMEOUT_MS = 10000;
+const MAX_CLASSIFY_TIMEOUT_MS = 1e4;
 const DEFAULT_TOOL_RESULT_MAX_IN_FLIGHT = 8;
 const MAX_TOOL_RESULT_MAX_IN_FLIGHT = 64;
-const RISK_RECORD_TTL_MS = 5 * 60 * 1000;
-const MAX_RISK_RECORDS = 10000;
-
-type RuntimeConfig = {
-  apiKey: string;
-  apiUrl: string;
-  timeoutMs: number;
-  toolResultMaxInFlight: number;
-};
-
-type RuntimeState = {
-  firewall: Firewall;
-  config: RuntimeConfig;
-};
-
-type HookLogMeta = {
-  hookName: string;
-  hook: HookLabel;
-  toolName?: string;
-  toolCallId?: string;
-  runId?: string;
-  sessionKey?: string;
-  sessionId?: string;
-  agentId?: string;
-  messageId?: string;
-  traceId?: string;
-  idempotencyKey?: string;
-};
-
-type RiskRecord = {
-  id: string;
-  runId?: string;
-  sessionKey?: string;
-  sessionId?: string;
-  agentId?: string;
-  traceId?: string;
-  promptHash: string;
-  prediction: string;
-  score: string;
-  createdAtMs: number;
-  expiresAtMs: number;
-  exactKeys: string[];
-  fallbackKey?: string;
-};
-
-type RiskMatch = {
-  record: RiskRecord;
-  matchKind: "exact" | "fallback";
-  matchKey: string;
-};
-
-export default definePluginEntry({
+const RISK_RECORD_TTL_MS = 5 * 60 * 1e3;
+const MAX_RISK_RECORDS = 1e4;
+var index_default = definePluginEntry({
   id: "firewall-plugin",
   name: "Firewall Plugin",
   description: "Adds hook-level Silmaril firewall classification to OpenClaw",
@@ -68,60 +18,53 @@ export default definePluginEntry({
     const registrationTimeoutMs = readIntegerInRange(
       readRecord(api.pluginConfig)?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
-      MAX_CLASSIFY_TIMEOUT_MS,
+      MAX_CLASSIFY_TIMEOUT_MS
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS;
     const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
-    let cachedFirewall: Firewall | undefined;
-    let cachedFirewallKey: string | undefined;
+    let cachedFirewall;
+    let cachedFirewallKey;
     let missingConfigWarned = false;
     let toolResultInFlight = 0;
-    const riskByExactKey = new Map<string, RiskRecord>();
-    const riskQueueByFallbackKey = new Map<string, RiskRecord[]>();
-
-    const getRuntime = (): RuntimeState | undefined => {
+    const riskByExactKey = /* @__PURE__ */ new Map();
+    const riskQueueByFallbackKey = /* @__PURE__ */ new Map();
+    const getRuntime = () => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
         if (!missingConfigWarned) {
           api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifications skipped");
           missingConfigWarned = true;
         }
-        return undefined;
+        return void 0;
       }
-
       missingConfigWarned = false;
       const cacheKey = `${config.apiUrl}\0${config.apiKey}\0${config.timeoutMs}`;
       if (!cachedFirewall || cachedFirewallKey !== cacheKey) {
         cachedFirewall = new Firewall({
           apiKey: config.apiKey,
           apiUrl: config.apiUrl,
-          timeoutMs: config.timeoutMs,
+          timeoutMs: config.timeoutMs
         });
         cachedFirewallKey = cacheKey;
       }
-
       return { firewall: cachedFirewall, config };
     };
-
     api.on("gateway_start", () => {
       api.logger.info("firewall-plugin: installed");
       if (shadowMode) {
         api.logger.info("firewall-plugin: Silmaril is in shadow mode");
       }
     }, hookOptions);
-
     api.on("before_prompt_build", async (event, ctx) => {
       const meta = buildHookLogMeta("before_prompt_build", HookLabel.USER_INPUT, event, ctx);
       if (typeof event?.prompt !== "string") {
         logSkipped(meta, "missing_prompt");
         return;
       }
-
       const runtime = getRuntime();
       if (!runtime) {
         logSkipped(meta, "missing_config");
         return;
       }
-
       try {
         const result = await classifyHookPayload(runtime.firewall, event.prompt, meta);
         if (isRisk(result)) {
@@ -129,30 +72,27 @@ export default definePluginEntry({
             buildRiskRecord({
               prompt: event.prompt,
               result,
-              meta,
+              meta
             }),
             riskByExactKey,
-            riskQueueByFallbackKey,
+            riskQueueByFallbackKey
           );
         }
       } catch (err) {
         logError(meta, err);
       }
     }, hookOptions);
-
     api.on("before_message_write", (event, ctx) => {
       const eventRecord = readRecord(event);
       const message = eventRecord?.message;
       if (!isAssistantMessageWithText(message)) {
         return;
       }
-
       const meta = buildHookLogMeta("before_message_write", HookLabel.USER_INPUT, event, ctx);
       const riskMatch = takeRiskRecord(meta, riskByExactKey, riskQueueByFallbackKey);
       if (!riskMatch) {
         return;
       }
-
       console.log("[firewall] before_message_write risk cache consumed:", JSON.stringify({
         ...logFields(meta),
         riskRecordId: riskMatch.record.id,
@@ -160,10 +100,9 @@ export default definePluginEntry({
         prediction: riskMatch.record.prediction,
         score: riskMatch.record.score,
         matchKind: riskMatch.matchKind,
-        matchKey: riskMatch.matchKey,
+        matchKey: riskMatch.matchKey
       }));
     }, hookOptions);
-
     api.on("before_tool_call", async (event, ctx) => {
       const meta = buildHookLogMeta("before_tool_call", HookLabel.TOOL_CALL, event, ctx);
       const runtime = getRuntime();
@@ -171,14 +110,12 @@ export default definePluginEntry({
         logSkipped(meta, "missing_config");
         return;
       }
-
       try {
         await classifyHookPayload(runtime.firewall, safeStringify(event?.params ?? {}), meta);
       } catch (err) {
         logError(meta, err);
       }
     }, hookOptions);
-
     api.on("tool_result_persist", (event, ctx) => {
       const meta = buildHookLogMeta("tool_result_persist", HookLabel.TOOL_RESPONSE, event, ctx);
       const runtime = getRuntime();
@@ -186,7 +123,6 @@ export default definePluginEntry({
         logSkipped(meta, "missing_config");
         return;
       }
-
       try {
         const text = extractToolResultText(event);
         if (!text.trim()) {
@@ -197,102 +133,82 @@ export default definePluginEntry({
           logSkipped(meta, "max_in_flight");
           return;
         }
-
         toolResultInFlight += 1;
         console.log("[firewall] tool_result_persist classify begin:", JSON.stringify(logFields(meta)));
-        void classifyHookPayload(runtime.firewall, text, meta)
-          .catch((err) => logError(meta, err))
-          .finally(() => {
-            toolResultInFlight = Math.max(0, toolResultInFlight - 1);
-          });
+        void classifyHookPayload(runtime.firewall, text, meta).catch((err) => logError(meta, err)).finally(() => {
+          toolResultInFlight = Math.max(0, toolResultInFlight - 1);
+        });
       } catch (err) {
         logError(meta, err);
       }
     }, hookOptions);
-  },
+  }
 });
-
-function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
+function resolveRuntimeConfig(rawConfig) {
   const config = readRecord(rawConfig);
   const apiKey = readString(config?.silmarilApiKey) ?? readString(config?.apiKey);
   const apiUrl = readString(config?.apiUrl);
   if (!apiKey || !apiUrl) {
-    return undefined;
+    return void 0;
   }
-
   return {
     apiKey,
     apiUrl,
     timeoutMs: readIntegerInRange(
       config?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
-      MAX_CLASSIFY_TIMEOUT_MS,
+      MAX_CLASSIFY_TIMEOUT_MS
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS,
     toolResultMaxInFlight: readIntegerInRange(
       config?.toolResultMaxInFlight,
       0,
-      MAX_TOOL_RESULT_MAX_IN_FLIGHT,
-    ) ?? DEFAULT_TOOL_RESULT_MAX_IN_FLIGHT,
+      MAX_TOOL_RESULT_MAX_IN_FLIGHT
+    ) ?? DEFAULT_TOOL_RESULT_MAX_IN_FLIGHT
   };
 }
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
+function readRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
 }
-
-function readString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+function readString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : void 0;
 }
-
-function readIntegerInRange(value: unknown, min: number, max: number): number | undefined {
-  const numberValue = typeof value === "string" && value.trim()
-    ? Number(value)
-    : value;
+function readIntegerInRange(value, min, max) {
+  const numberValue = typeof value === "string" && value.trim() ? Number(value) : value;
   if (typeof numberValue !== "number" || !Number.isFinite(numberValue)) {
-    return undefined;
+    return void 0;
   }
   const integerValue = Math.trunc(numberValue);
   if (integerValue < min || integerValue > max) {
-    return undefined;
+    return void 0;
   }
   return integerValue;
 }
-
-function readOptionalBoolean(value: unknown): boolean | undefined {
-  if (typeof value !== "string") return undefined;
+function readOptionalBoolean(value) {
+  if (typeof value !== "string") return void 0;
   const normalized = value.trim().toLowerCase();
-  if (!normalized) return undefined;
+  if (!normalized) return void 0;
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
-  return undefined;
+  return void 0;
 }
-
-async function classifyHookPayload(
-  firewall: Firewall,
-  text: string,
-  meta: HookLogMeta,
-): Promise<{ prediction?: unknown; score?: unknown } | undefined> {
+async function classifyHookPayload(firewall, text, meta) {
   const trimmed = text.trim();
   if (!trimmed) {
     logSkipped(meta, "empty_payload");
-    return undefined;
+    return void 0;
   }
-
   const result = await firewall.classify(text, {
     hook: meta.hook,
-    toolName: meta.toolName,
+    toolName: meta.toolName
   });
   console.log("[firewall] " + meta.hookName + " result:", JSON.stringify({
     ...logFields(meta),
     prediction: result.prediction,
-    score: result.score,
+    score: result.score
   }));
   return result;
 }
-
-function buildHookLogMeta(hookName: string, hook: HookLabel, event: unknown, ctx: unknown): HookLogMeta {
+function buildHookLogMeta(hookName, hook, event, ctx) {
   const eventRecord = readRecord(event);
   const ctxRecord = readRecord(ctx);
   const messageRecord = readRecord(eventRecord?.message);
@@ -307,39 +223,31 @@ function buildHookLogMeta(hookName: string, hook: HookLabel, event: unknown, ctx
     agentId: readString(eventRecord?.agentId) ?? readString(ctxRecord?.agentId) ?? readString(messageRecord?.agentId),
     messageId: readString(eventRecord?.messageId) ?? readString(ctxRecord?.messageId) ?? readString(messageRecord?.id),
     traceId: readString(eventRecord?.traceId) ?? readTraceId(eventRecord?.trace) ?? readString(ctxRecord?.traceId) ?? readTraceId(ctxRecord?.trace),
-    idempotencyKey: readString(eventRecord?.idempotencyKey) ?? readString(ctxRecord?.idempotencyKey) ?? readString(messageRecord?.idempotencyKey),
+    idempotencyKey: readString(eventRecord?.idempotencyKey) ?? readString(ctxRecord?.idempotencyKey) ?? readString(messageRecord?.idempotencyKey)
   };
 }
-
-function readTraceId(value: unknown): string | undefined {
+function readTraceId(value) {
   const record = readRecord(value);
   return readString(record?.traceId) ?? readString(record?.id);
 }
-
-function buildExactRiskKeys(meta: HookLogMeta): string[] {
+function buildExactRiskKeys(meta) {
   const keys = [
-    meta.runId ? `run:${meta.runId}` : undefined,
-    meta.traceId ? `trace:${meta.traceId}` : undefined,
-    meta.idempotencyKey ? `idempotency:${meta.idempotencyKey}` : undefined,
-    meta.runId && meta.sessionKey ? `session:${meta.sessionKey}:run:${meta.runId}` : undefined,
-    meta.runId && meta.agentId ? `agent:${meta.agentId}:run:${meta.runId}` : undefined,
-  ].filter((key): key is string => typeof key === "string" && key.length > 0);
+    meta.runId ? `run:${meta.runId}` : void 0,
+    meta.traceId ? `trace:${meta.traceId}` : void 0,
+    meta.idempotencyKey ? `idempotency:${meta.idempotencyKey}` : void 0,
+    meta.runId && meta.sessionKey ? `session:${meta.sessionKey}:run:${meta.runId}` : void 0,
+    meta.runId && meta.agentId ? `agent:${meta.agentId}:run:${meta.runId}` : void 0
+  ].filter((key) => typeof key === "string" && key.length > 0);
   return [...new Set(keys)];
 }
-
-function buildFallbackRiskQueueKey(meta: HookLogMeta): string | undefined {
+function buildFallbackRiskQueueKey(meta) {
   if (meta.agentId && meta.sessionKey) return `agent:${meta.agentId}:session:${meta.sessionKey}`;
   if (meta.sessionKey) return `session:${meta.sessionKey}`;
   if (meta.agentId && meta.sessionId) return `agent:${meta.agentId}:sessionId:${meta.sessionId}`;
   if (meta.sessionId) return `sessionId:${meta.sessionId}`;
-  return undefined;
+  return void 0;
 }
-
-function buildRiskRecord(params: {
-  prompt: string;
-  result: { prediction?: unknown; score?: unknown };
-  meta: HookLogMeta;
-}): RiskRecord {
+function buildRiskRecord(params) {
   const createdAtMs = Date.now();
   const promptHash = createHash("sha256").update(params.prompt).digest("hex").slice(0, 16);
   const exactKeys = buildExactRiskKeys(params.meta);
@@ -353,7 +261,7 @@ function buildRiskRecord(params: {
       params.meta.traceId ?? "no-trace",
       promptHash,
       String(createdAtMs),
-      randomUUID(),
+      randomUUID()
     ].join(":"),
     runId: params.meta.runId,
     sessionKey: params.meta.sessionKey,
@@ -366,15 +274,10 @@ function buildRiskRecord(params: {
     createdAtMs,
     expiresAtMs: createdAtMs + RISK_RECORD_TTL_MS,
     exactKeys,
-    fallbackKey,
+    fallbackKey
   };
 }
-
-function rememberRiskRecord(
-  record: RiskRecord,
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): void {
+function rememberRiskRecord(record, riskByExactKey, riskQueueByFallbackKey) {
   pruneRiskRecords(Date.now(), riskByExactKey, riskQueueByFallbackKey);
   if (record.exactKeys.length === 0 && !record.fallbackKey) {
     console.log("[firewall] before_prompt_build risk cache skipped:", JSON.stringify({
@@ -382,12 +285,11 @@ function rememberRiskRecord(
       promptHash: record.promptHash,
       prediction: record.prediction,
       score: record.score,
-      reason: "missing_correlation_key",
+      reason: "missing_correlation_key"
     }));
     return;
   }
-
-  const replacedRecords = new Set<RiskRecord>();
+  const replacedRecords = /* @__PURE__ */ new Set();
   for (const key of record.exactKeys) {
     const existing = riskByExactKey.get(key);
     if (existing && existing.id !== record.id && !replacedRecords.has(existing)) {
@@ -402,7 +304,6 @@ function rememberRiskRecord(
     riskQueueByFallbackKey.set(record.fallbackKey, queue);
   }
   trimRiskRecords(riskByExactKey, riskQueueByFallbackKey);
-
   console.log("[firewall] before_prompt_build risk cached:", JSON.stringify({
     runId: record.runId,
     sessionKey: record.sessionKey,
@@ -414,18 +315,12 @@ function rememberRiskRecord(
     prediction: record.prediction,
     score: record.score,
     exactKeys: record.exactKeys,
-    fallbackKey: record.fallbackKey,
+    fallbackKey: record.fallbackKey
   }));
 }
-
-function takeRiskRecord(
-  meta: HookLogMeta,
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): RiskMatch | undefined {
+function takeRiskRecord(meta, riskByExactKey, riskQueueByFallbackKey) {
   const now = Date.now();
   pruneRiskRecords(now, riskByExactKey, riskQueueByFallbackKey);
-
   for (const key of buildExactRiskKeys(meta)) {
     const record = riskByExactKey.get(key);
     if (record && !isExpiredRiskRecord(record, now)) {
@@ -433,16 +328,14 @@ function takeRiskRecord(
       return {
         record,
         matchKind: "exact",
-        matchKey: key,
+        matchKey: key
       };
     }
   }
-
   const fallbackKey = buildFallbackRiskQueueKey(meta);
   if (!fallbackKey) {
-    return undefined;
+    return void 0;
   }
-
   const queue = riskQueueByFallbackKey.get(fallbackKey);
   while (queue?.length) {
     const record = queue.shift();
@@ -454,18 +347,13 @@ function takeRiskRecord(
     return {
       record,
       matchKind: "fallback",
-      matchKey: fallbackKey,
+      matchKey: fallbackKey
     };
   }
   riskQueueByFallbackKey.delete(fallbackKey);
-  return undefined;
+  return void 0;
 }
-
-function pruneRiskRecords(
-  now: number,
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): void {
+function pruneRiskRecords(now, riskByExactKey, riskQueueByFallbackKey) {
   for (const [key, record] of riskByExactKey.entries()) {
     if (isExpiredRiskRecord(record, now)) riskByExactKey.delete(key);
   }
@@ -475,23 +363,15 @@ function pruneRiskRecords(
     else riskQueueByFallbackKey.delete(fallbackKey);
   }
 }
-
-function trimRiskRecords(
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): void {
+function trimRiskRecords(riskByExactKey, riskQueueByFallbackKey) {
   while (countRiskRecords(riskByExactKey, riskQueueByFallbackKey) > MAX_RISK_RECORDS) {
     const oldest = findOldestRiskRecord(riskByExactKey, riskQueueByFallbackKey);
     if (!oldest) return;
     removeRiskRecord(oldest, riskByExactKey, riskQueueByFallbackKey);
   }
 }
-
-function countRiskRecords(
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): number {
-  const ids = new Set<string>();
+function countRiskRecords(riskByExactKey, riskQueueByFallbackKey) {
+  const ids = /* @__PURE__ */ new Set();
   for (const record of riskByExactKey.values()) {
     ids.add(record.id);
   }
@@ -502,13 +382,9 @@ function countRiskRecords(
   }
   return ids.size;
 }
-
-function findOldestRiskRecord(
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): RiskRecord | undefined {
-  let oldest: RiskRecord | undefined;
-  const visit = (record: RiskRecord) => {
+function findOldestRiskRecord(riskByExactKey, riskQueueByFallbackKey) {
+  let oldest;
+  const visit = (record) => {
     if (!oldest || record.createdAtMs < oldest.createdAtMs) {
       oldest = record;
     }
@@ -523,12 +399,7 @@ function findOldestRiskRecord(
   }
   return oldest;
 }
-
-function removeRiskRecord(
-  record: RiskRecord,
-  riskByExactKey: Map<string, RiskRecord>,
-  riskQueueByFallbackKey: Map<string, RiskRecord[]>,
-): void {
+function removeRiskRecord(record, riskByExactKey, riskQueueByFallbackKey) {
   for (const key of record.exactKeys) {
     riskByExactKey.delete(key);
   }
@@ -539,35 +410,28 @@ function removeRiskRecord(
   if (filtered.length > 0) riskQueueByFallbackKey.set(record.fallbackKey, filtered);
   else riskQueueByFallbackKey.delete(record.fallbackKey);
 }
-
-function isExpiredRiskRecord(record: RiskRecord, now: number): boolean {
+function isExpiredRiskRecord(record, now) {
   return record.expiresAtMs < now;
 }
-
-function formatScore(score: unknown): string {
-  return typeof score === "number" && Number.isFinite(score)
-    ? score.toFixed(3)
-    : "unknown";
+function formatScore(score) {
+  return typeof score === "number" && Number.isFinite(score) ? score.toFixed(3) : "unknown";
 }
-
-function isAssistantMessageWithText(value: unknown): boolean {
+function isAssistantMessageWithText(value) {
   const message = readRecord(value);
   if (readString(message?.role) !== "assistant") return false;
   return findTextContentIndex(message?.content) !== -1;
 }
-
-function findTextContentIndex(content: unknown): number {
+function findTextContentIndex(content) {
   if (typeof content === "string") return content.trim().length > 0 ? 0 : -1;
   if (!Array.isArray(content)) return -1;
   return content.findIndex((part) => {
     if (typeof part === "string") return part.trim().length > 0;
     if (!part || typeof part !== "object" || Array.isArray(part)) return false;
-    const partRecord = part as Record<string, unknown>;
+    const partRecord = part;
     return typeof partRecord.text === "string" && partRecord.text.trim().length > 0;
   });
 }
-
-function logFields(meta: HookLogMeta): Record<string, string> {
+function logFields(meta) {
   return Object.fromEntries(
     Object.entries({
       hook: meta.hook,
@@ -579,27 +443,24 @@ function logFields(meta: HookLogMeta): Record<string, string> {
       agentId: meta.agentId,
       messageId: meta.messageId,
       traceId: meta.traceId,
-      idempotencyKey: meta.idempotencyKey,
-    }).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0),
+      idempotencyKey: meta.idempotencyKey
+    }).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0)
   );
 }
-
-function logSkipped(meta: HookLogMeta, reason: string): void {
+function logSkipped(meta, reason) {
   console.log("[firewall] " + meta.hookName + " skipped:", JSON.stringify({
     ...logFields(meta),
-    reason,
+    reason
   }));
 }
-
-function logError(meta: HookLogMeta, err: unknown): void {
+function logError(meta, err) {
   console.error("[firewall] " + meta.hookName + " error:", JSON.stringify({
     ...logFields(meta),
-    error: err instanceof Error ? err.message : String(err),
+    error: err instanceof Error ? err.message : String(err)
   }));
 }
-
-function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
+function safeStringify(value) {
+  const seen = /* @__PURE__ */ new WeakSet();
   try {
     return JSON.stringify(value, (_key, currentValue) => {
       if (typeof currentValue === "bigint") {
@@ -617,37 +478,32 @@ function safeStringify(value: unknown): string {
     return String(value ?? "");
   }
 }
-
-function isRisk(result: { prediction?: unknown } | undefined): boolean {
+function isRisk(result) {
   return String(result?.prediction ?? "").toUpperCase() === "MALICIOUS";
 }
-
-function extractToolResultText(event: { message?: { content?: unknown } } | undefined): string {
+function extractToolResultText(event) {
   const content = event?.message?.content;
   if (typeof content === "string") {
     return content;
   }
   if (content && typeof content === "object" && !Array.isArray(content)) {
-    const text = (content as { text?: unknown }).text;
+    const text = content.text;
     return typeof text === "string" ? text : "";
   }
   if (!Array.isArray(content)) {
     return "";
   }
-  return content
-    .map((part) => {
-      if (typeof part === "string") {
-        return part;
-      }
-      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-        return (part as { text: string }).text;
-      }
-      return "";
-    })
-    .join("\n");
+  return content.map((part) => {
+    if (typeof part === "string") {
+      return part;
+    }
+    if (part && typeof part === "object" && typeof part.text === "string") {
+      return part.text;
+    }
+    return "";
+  }).join("\n");
 }
-
-export const __testInternals = {
+const __testInternals = {
   RISK_RECORD_TTL_MS,
   MAX_RISK_RECORDS,
   resolveRuntimeConfig,
@@ -677,5 +533,9 @@ export const __testInternals = {
   logError,
   safeStringify,
   isRisk,
-  extractToolResultText,
+  extractToolResultText
+};
+export {
+  __testInternals,
+  index_default as default
 };
