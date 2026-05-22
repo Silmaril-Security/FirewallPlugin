@@ -11,6 +11,7 @@
     "additionalProperties": true,
     "properties": {
       "apiKey": { "type": "string" },
+      "silmarilApiKey": { "type": "string" },
       "apiUrl": { "type": "string" },
       "timeoutMs": {
         "type": "integer",
@@ -28,6 +29,7 @@
   },
   "uiHints": {
     "apiKey": { "label": "API Key", "sensitive": true },
+    "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
     "apiUrl": { "label": "API URL" },
     "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
     "toolResultMaxInFlight": { "label": "Tool result max in flight", "advanced": true }

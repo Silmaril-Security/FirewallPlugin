@@ -146,7 +146,7 @@ var index_default = definePluginEntry({
 });
 function resolveRuntimeConfig(rawConfig) {
   const config = readRecord(rawConfig);
-  const apiKey = readString(config?.apiKey);
+  const apiKey = readString(config?.silmarilApiKey) ?? readString(config?.apiKey);
   const apiUrl = readString(config?.apiUrl);
   if (!apiKey || !apiUrl) {
     return void 0;

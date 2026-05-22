@@ -198,6 +198,23 @@ test("config: trims required fields and applies defaults", () => {
   });
 });
 
+test("config: silmarilApiKey is accepted and preferred over apiKey", () => {
+  assert.deepEqual(t.resolveRuntimeConfig({ silmarilApiKey: " silmaril-key ", apiUrl: " https://x " }), {
+    apiKey: "silmaril-key",
+    apiUrl: "https://x",
+    timeoutMs: 2500,
+    toolResultMaxInFlight: 8,
+  });
+  assert.equal(
+    t.resolveRuntimeConfig({
+      apiKey: "plugin-identity-key",
+      silmarilApiKey: "silmaril-classifier-key",
+      apiUrl: "https://x",
+    }).apiKey,
+    "silmaril-classifier-key",
+  );
+});
+
 test("config: timeout and in-flight bounds are enforced", () => {
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: "999.8" }).timeoutMs, 999);
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: 249 }).timeoutMs, 2500);

@@ -214,7 +214,7 @@ export default definePluginEntry({
 
 function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
   const config = readRecord(rawConfig);
-  const apiKey = readString(config?.apiKey);
+  const apiKey = readString(config?.silmarilApiKey) ?? readString(config?.apiKey);
   const apiUrl = readString(config?.apiUrl);
   if (!apiKey || !apiUrl) {
     return undefined;

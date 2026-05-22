@@ -62,7 +62,8 @@ the rest of the user's OpenClaw config and add the absolute repository path to
       "firewall-plugin": {
         "enabled": true,
         "config": {
-          "apiKey": "your-silmaril-api-key",
+          "apiKey": "your-plugin-or-legacy-silmaril-api-key",
+          "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify",
           "timeoutMs": 2500,
           "toolResultMaxInFlight": 8
@@ -76,8 +77,10 @@ the rest of the user's OpenClaw config and add the absolute repository path to
 }
 ```
 
-`apiUrl` should be the full classify endpoint URL. The plugin reads both values
-from OpenClaw plugin config during hook execution.
+`apiUrl` should be the full classify endpoint URL. The plugin reads these values
+from OpenClaw plugin config during hook execution. `silmarilApiKey` is preferred
+for Silmaril classification when present; `apiKey` remains supported as the
+legacy fallback and may otherwise be used as a plugin or OpenClaw identity key.
 
 `timeoutMs` and `toolResultMaxInFlight` are optional. `timeoutMs` defaults to
 `2500` and bounds each classifier request. `toolResultMaxInFlight` defaults to

@@ -77,7 +77,9 @@ Runtime behavior:
 
 Configuration fields:
 
-- `apiKey`: Silmaril API key
+- `silmarilApiKey`: preferred Silmaril classifier API key
+- `apiKey`: legacy Silmaril API key fallback; may remain the plugin identity key
+  when `silmarilApiKey` is present
 - `apiUrl`: full Silmaril classify endpoint URL, ending in `/classify`
 - `timeoutMs`: optional classifier timeout in milliseconds; default `2500`
 - `toolResultMaxInFlight`: optional asynchronous tool-result classification
@@ -165,7 +167,8 @@ for direct source loading or the CLI install path is unavailable.
          "firewall-plugin": {
            "enabled": true,
            "config": {
-             "apiKey": "<SILMARIL_API_KEY>",
+             "apiKey": "<PLUGIN_OR_LEGACY_SILMARIL_API_KEY>",
+             "silmarilApiKey": "<SILMARIL_API_KEY>",
              "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify",
              "timeoutMs": 2500,
              "toolResultMaxInFlight": 8

@@ -60,7 +60,8 @@ The isolated config should set:
 - `gateway.tailscale.mode`: `off`.
 - `plugins.load.paths`: absolute path to this repo.
 - `plugins.entries.firewall-plugin.enabled`: `true`.
-- `plugins.entries.firewall-plugin.config.apiKey`: alpha test API key.
+- `plugins.entries.firewall-plugin.config.silmarilApiKey`: preferred alpha test API key.
+- `plugins.entries.firewall-plugin.config.apiKey`: legacy fallback alpha test API key, or plugin identity key when `silmarilApiKey` is set.
 - `plugins.entries.firewall-plugin.config.apiUrl`: alpha classifier endpoint.
 - model provider credentials copied from the local OpenClaw config only when required for real model calls.
 
@@ -255,7 +256,8 @@ timeout_seconds: number
 run_marker: string
 config:
   plugin_config:
-    apiKey: alpha key
+    silmarilApiKey: preferred alpha key
+    apiKey: legacy fallback alpha key | plugin identity key
     apiUrl: alpha classifier endpoint
   openclaw_overrides:
     gateway.port: auto | number
@@ -371,7 +373,9 @@ OpenClaw/plugin coverage review:
   the assistant message.
 - OpenClaw runs `before_tool_call` before tool execution. Tests must prove tool arguments are classified before execution, then OpenClaw continues even when the classifier reports malicious input.
 - OpenClaw runs `tool_result_persist` synchronously before tool output is persisted. Tests must prove the hook never returns a Promise and that malicious tool output is classified before persistence.
-- The plugin disables itself when `apiKey` or `apiUrl` is missing.
+- The plugin disables itself when neither `silmarilApiKey` nor `apiKey` is
+  present, or when `apiUrl` is missing. If both keys are present, Silmaril
+  classification must use `silmarilApiKey`.
 - The plugin should log classifier errors without registering wrappers or exporter paths, and all classifier failures should fail open.
 - The plugin must never register wrapper tools, web fetch providers, false-positive tools, local exporter state, inboxes, checkpoints, upload leases, or approval handles.
 - The plugin must never return or log `appendSystemContext`,
@@ -493,6 +497,19 @@ tests:
     expected_local_logs: ["apiKey or apiUrl missing - classifications skipped"]
     expected_forbidden_logs: ["before_prompt_build result:", "registered silmaril-firewall"]
     expected_s3: { marker: E2E_010_<uuid>, records: 0 }
+
+  - id: e2e-010a-silmaril-api-key-compat
+    length: medium
+    purpose: Existing configs that set silmarilApiKey continue to classify without using apiKey as the Silmaril credential.
+    config_override:
+      apiKey: "plugin-identity-key"
+      silmarilApiKey: alpha key
+      apiUrl: alpha classifier endpoint
+    message: "Reply with E2E_010A_<uuid>."
+    expected_text_contains: ["E2E_010A_"]
+    expected_local_logs: ["before_prompt_build result:"]
+    expected_forbidden_logs: ["missing_config", "apiKey or apiUrl missing - classifications skipped"]
+    expected_s3: { marker: E2E_010A_<uuid>, hooks: [user_input] }
 
   - id: e2e-011-invalid-alpha-url
     length: medium
