@@ -424,6 +424,20 @@ tests:
     expected_hooks: { user_input: 1, tool_call: 0, tool_response: 0 }
     expected_s3: { marker: E2E_001_<uuid>, hooks: [user_input] }
 
+  - id: e2e-001a-package-install-build-metadata
+    length: short
+    purpose: Fresh package install and build use a single merged devDependencies block.
+    execution:
+      - "In a clean checkout or container, run npm install --include=dev."
+      - "Run npm run build."
+      - "Run npm test or the package metadata regression test."
+    expected_package_json:
+      devDependencies_key_count: 1
+      devDependencies_include: [esbuild, tsx]
+    expected_forbidden_output:
+      - "Duplicate key \"devDependencies\""
+    expected_build_output: "No duplicate-object-key warning from esbuild."
+
   - id: e2e-002-tools-verbose-no-wrappers
     length: short
     purpose: Verify visible OpenClaw tool list has no plugin wrapper tools.

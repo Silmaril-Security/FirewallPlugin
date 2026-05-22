@@ -215,6 +215,14 @@ test("config: silmarilApiKey is accepted and preferred over apiKey", () => {
   );
 });
 
+test("package metadata: devDependencies is unique and complete", async () => {
+  const packageSource = await readFile(path.join(repoRoot, "package.json"), "utf8");
+  assert.equal((packageSource.match(/"devDependencies"\s*:/g) ?? []).length, 1);
+
+  const packageJson = JSON.parse(packageSource);
+  assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
+});
+
 test("config: timeout and in-flight bounds are enforced", () => {
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: "999.8" }).timeoutMs, 999);
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: 249 }).timeoutMs, 2500);
