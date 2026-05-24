@@ -49,30 +49,16 @@ Runtime behavior:
 - `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
   startup hooks
 - `before_prompt_build` sends user prompt text as `USER_INPUT`
-- `before_message_write` consumes a cached user-input risk record for the
-  matching assistant message after inference
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
-- shadow mode defaults to on: unset `SILMARIL_FIREWALL_SHADOW_MODE` behaves the
-  same as `SILMARIL_FIREWALL_SHADOW_MODE=true`
-- malicious `before_prompt_build` classifications are cached as short-lived
-  in-memory risk records instead of being added to model context or assistant
-  output
-- cached risk records use exact keys when available (`runId`, `traceId`,
-  `idempotencyKey`, and scoped run combinations), plus an
-  `agentId`/`sessionKey` FIFO fallback for current `before_message_write`
-  contexts that do not expose `runId`; TTL and the global record cap bound
-  memory
-- `before_message_write` consumes the matching cached risk record and logs the
-  cache consumption; it does not mutate the assistant message
-- no warning, stub, prompt, system, or developer context is added in either mode
-- `SILMARIL_FIREWALL_SHADOW_MODE` is parsed only for startup logging; when it
-  is enabled, `gateway_start` logs `firewall-plugin: Silmaril is in shadow mode`
-- benign `before_prompt_build` classifications do not populate the risk cache
+- no classifier result is cached or consumed later
+- no warning, stub, prompt, system, or developer context is added
+- assistant output is not changed
+- no wrapper tools, exporters, queues, or enforcement behavior are registered
 - classifier errors fail open
 
 Configuration fields:
@@ -82,8 +68,6 @@ Configuration fields:
   when `silmarilApiKey` is present
 - `apiUrl`: full Silmaril classify endpoint URL, ending in `/classify`
 - `timeoutMs`: optional classifier timeout in milliseconds; default `2500`
-- `toolResultMaxInFlight`: optional asynchronous tool-result classification
-  concurrency limit; default `8`
 
 Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
 OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
@@ -169,8 +153,7 @@ for direct source loading or the CLI install path is unavailable.
              "apiKey": "<PLUGIN_OR_LEGACY_SILMARIL_API_KEY>",
              "silmarilApiKey": "<SILMARIL_API_KEY>",
              "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify",
-             "timeoutMs": 2500,
-             "toolResultMaxInFlight": 8
+             "timeoutMs": 2500
            }
          }
        },
@@ -234,12 +217,11 @@ for direct source loading or the CLI install path is unavailable.
    Status: loaded
    Format: openclaw
    Shape: hook-only
-   Typed hooks:
-   gateway_start
-   before_prompt_build
-   before_message_write
-   before_tool_call
-   tool_result_persist
+    Typed hooks:
+    gateway_start
+    before_prompt_build
+    before_tool_call
+    tool_result_persist
    ```
 
 11. Run a manual smoke test:
@@ -254,12 +236,8 @@ for direct source loading or the CLI install path is unavailable.
 
     ```text
     firewall-plugin: installed
-    firewall-plugin: Silmaril is in shadow mode
     [firewall] before_prompt_build result:
-    [firewall] before_prompt_build risk cached:
-    [firewall] before_message_write risk cache consumed:
     [firewall] before_tool_call result:
-    [firewall] tool_result_persist classify begin
     [firewall] tool_result_persist result:
     ```
 
