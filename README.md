@@ -17,7 +17,6 @@ registers typed Gateway hooks with `api.on(...)`.
 |---|---|---|
 | `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
 | `before_prompt_build` | `USER_INPUT` | User prompt text |
-| `before_message_write` | n/a | Consumes a cached user-input risk record for the matching assistant message |
 | `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
 
@@ -26,12 +25,10 @@ Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
 `before_prompt_build` and `before_tool_call` await the Silmaril SDK directly
-with a plugin-owned timeout. `before_message_write` is synchronous and does not
-classify; it only consumes a cached prompt-risk record for the matching
-assistant message. `tool_result_persist` is a synchronous
-OpenClaw hook, so the plugin starts a bounded fail-open classification request
-and returns immediately. The result is logged when the classifier call
-completes. Image-only and other empty tool results are skipped.
+with a plugin-owned timeout. `tool_result_persist` is a synchronous OpenClaw
+hook, so the plugin starts a fail-open classification request and returns
+immediately. The result is logged when the classifier call completes.
+Image-only and other empty tool results are skipped.
 
 ## Files
 
@@ -65,8 +62,7 @@ the rest of the user's OpenClaw config and add the absolute repository path to
           "apiKey": "your-plugin-or-legacy-silmaril-api-key",
           "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify",
-          "timeoutMs": 2500,
-          "toolResultMaxInFlight": 8
+          "timeoutMs": 2500
         }
       }
     },
@@ -82,40 +78,17 @@ from OpenClaw plugin config during hook execution. `silmarilApiKey` is preferred
 for Silmaril classification when present; `apiKey` remains supported as the
 legacy fallback and may otherwise be used as a plugin or OpenClaw identity key.
 
-`timeoutMs` and `toolResultMaxInFlight` are optional. `timeoutMs` defaults to
-`2500` and bounds each classifier request. `toolResultMaxInFlight` defaults to
-`8` and bounds asynchronous `tool_result_persist` classifications.
+`timeoutMs` is optional. It defaults to `2500` and bounds each classifier
+request.
 
 Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
 OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
 that setting blocks the hook registration.
 
-## Shadow Mode
+The plugin is pass-through only. It does not cache classifier results, block
+execution, add prompt/system/developer context, change assistant output, or
+register wrapper tools.
 
-Shadow mode is controlled by the optional `SILMARIL_FIREWALL_SHADOW_MODE`
-environment variable. It defaults to `true`.
-
-Both shadow-mode values classify hook payloads, cache malicious user-input
-records, and consume matching cache records without changing model context or
-assistant output. For a malicious `before_prompt_build` result, the plugin
-stores a short-lived in-memory risk record keyed by the strongest available
-correlation fields: `runId`, `traceId`, `idempotencyKey`, `agentId`,
-`sessionKey`, prompt hash, timestamp, and a random record id. Current OpenClaw
-`before_message_write` contexts commonly expose only `agentId` and `sessionKey`,
-so the plugin uses exact keys when available and a FIFO fallback otherwise. The
-fallback is bounded by the global TTL and record cap.
-
-When shadow mode is enabled, gateway startup logs:
-
-```text
-firewall-plugin: Silmaril is in shadow mode
-```
-
-The plugin does not add warnings, stubs, prompt, system, or developer context
-in either mode. Benign classifications keep the user experience unchanged.
-
-Accepted false values are `false`, `0`, `no`, and `off`. Accepted true values
-are `true`, `1`, `yes`, and `on`.
 
 ## Install
 
@@ -191,7 +164,6 @@ Shape: hook-only
 Typed hooks:
 gateway_start
 before_prompt_build
-before_message_write
 before_tool_call
 tool_result_persist
 ```
@@ -222,12 +194,8 @@ Check the gateway logs for the install confirmation and classification entries:
 
 ```text
 firewall-plugin: installed
-firewall-plugin: Silmaril is in shadow mode
 [firewall] before_prompt_build result:
-[firewall] before_prompt_build risk cached:
-[firewall] before_message_write risk cache consumed:
 [firewall] before_tool_call result:
-[firewall] tool_result_persist classify begin
 [firewall] tool_result_persist result:
 ```
 

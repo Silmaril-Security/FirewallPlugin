@@ -1,7 +1,7 @@
 {
   "id": "firewall-plugin",
   "name": "Firewall Plugin",
-  "description": "Classifies OpenClaw prompts, tool calls, and persisted tool results through Silmaril hooks. It does not register wrapper tools or web fetch providers.",
+  "description": "Passes OpenClaw prompt, tool-call, and persisted tool-result hook payloads to Silmaril for classification.",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]
@@ -18,12 +18,6 @@
         "minimum": 250,
         "maximum": 10000,
         "default": 2500
-      },
-      "toolResultMaxInFlight": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 64,
-        "default": 8
       }
     }
   },
@@ -31,7 +25,6 @@
     "apiKey": { "label": "API Key", "sensitive": true },
     "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
     "apiUrl": { "label": "API URL" },
-    "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
-    "toolResultMaxInFlight": { "label": "Tool result max in flight", "advanced": true }
+    "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true }
   }
 }
