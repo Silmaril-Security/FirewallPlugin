@@ -15,6 +15,11 @@ type RuntimeState = {
   firewall: Firewall;
 };
 
+type RuntimeClient = {
+  config: RuntimeConfig;
+  state: RuntimeState;
+};
+
 type HookLogMeta = {
   hookName: string;
   hook: HookLabel;
@@ -41,6 +46,7 @@ export default definePluginEntry({
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS;
     const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
     let missingConfigWarned = false;
+    let runtimeClient: RuntimeClient | undefined;
 
     const getRuntime = (): RuntimeState | undefined => {
       const config = resolveRuntimeConfig(api.pluginConfig);
@@ -53,13 +59,20 @@ export default definePluginEntry({
       }
 
       missingConfigWarned = false;
-      return {
-        firewall: new Firewall({
-          apiKey: config.apiKey,
-          apiUrl: config.apiUrl,
-          timeoutMs: config.timeoutMs,
-        }),
-      };
+      if (!runtimeClient || !sameRuntimeConfig(runtimeClient.config, config)) {
+        runtimeClient = {
+          config,
+          state: {
+            firewall: new Firewall({
+              apiKey: config.apiKey,
+              apiUrl: config.apiUrl,
+              timeoutMs: config.timeoutMs,
+            }),
+          },
+        };
+      }
+
+      return runtimeClient.state;
     };
 
     api.on("gateway_start", () => {
@@ -124,6 +137,12 @@ export default definePluginEntry({
     }, hookOptions);
   },
 });
+
+function sameRuntimeConfig(left: RuntimeConfig, right: RuntimeConfig): boolean {
+  return left.apiKey === right.apiKey
+    && left.apiUrl === right.apiUrl
+    && left.timeoutMs === right.timeoutMs;
+}
 
 function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
   const config = readRecord(rawConfig);

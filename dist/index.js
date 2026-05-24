@@ -15,6 +15,7 @@ var index_default = definePluginEntry({
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS;
     const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
     let missingConfigWarned = false;
+    let runtimeClient;
     const getRuntime = () => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
@@ -25,13 +26,19 @@ var index_default = definePluginEntry({
         return void 0;
       }
       missingConfigWarned = false;
-      return {
-        firewall: new Firewall({
-          apiKey: config.apiKey,
-          apiUrl: config.apiUrl,
-          timeoutMs: config.timeoutMs
-        })
-      };
+      if (!runtimeClient || !sameRuntimeConfig(runtimeClient.config, config)) {
+        runtimeClient = {
+          config,
+          state: {
+            firewall: new Firewall({
+              apiKey: config.apiKey,
+              apiUrl: config.apiUrl,
+              timeoutMs: config.timeoutMs
+            })
+          }
+        };
+      }
+      return runtimeClient.state;
     };
     api.on("gateway_start", () => {
       api.logger.info("firewall-plugin: installed");
@@ -86,6 +93,9 @@ var index_default = definePluginEntry({
     }, hookOptions);
   }
 });
+function sameRuntimeConfig(left, right) {
+  return left.apiKey === right.apiKey && left.apiUrl === right.apiUrl && left.timeoutMs === right.timeoutMs;
+}
 function resolveRuntimeConfig(rawConfig) {
   const config = readRecord(rawConfig);
   const apiKey = readString(config?.silmarilApiKey) ?? readString(config?.apiKey);

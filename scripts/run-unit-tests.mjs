@@ -372,6 +372,40 @@ test("plugin: before_tool_call classifies safe-stringified params", async () => 
   });
 });
 
+test("plugin: stable runtime config reuses one Firewall client", async () => {
+  const config = { apiKey: "k", apiUrl: "u", timeoutMs: 777 };
+  const env = registerPlugin({ config });
+  await withSilencedConsole(async () => {
+    await hook(env, "before_prompt_build")({ prompt: "first" }, {});
+    await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
+    hook(env, "tool_result_persist")({ message: { content: "tool output" } }, {});
+    await sleep(0);
+  });
+
+  assert.equal(globalThis.__silmarilFirewallInstances.length, 1);
+  assert.deepEqual(globalThis.__silmarilFirewallInstances[0].options, {
+    apiKey: "k",
+    apiUrl: "u",
+    timeoutMs: 777,
+  });
+});
+
+test("plugin: runtime config changes create a new Firewall client", async () => {
+  const config = { apiKey: "k", apiUrl: "u1", timeoutMs: 777 };
+  const env = registerPlugin({ config });
+  await withSilencedConsole(async () => {
+    await hook(env, "before_prompt_build")({ prompt: "first" }, {});
+    config.apiUrl = "u2";
+    await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
+  });
+
+  assert.equal(globalThis.__silmarilFirewallInstances.length, 2);
+  assert.deepEqual(
+    globalThis.__silmarilFirewallInstances.map((entry) => entry.options.apiUrl),
+    ["u1", "u2"],
+  );
+});
+
 test("plugin: tool_result_persist starts pass-through classification and returns immediately", async () => {
   const env = registerPlugin();
   let release;
@@ -408,7 +442,7 @@ test("plugin: classifier errors are logged and fail open", async () => {
   });
 });
 
-test("source invariant: runtime has no cache, shadow mode, wrappers, or prompt mutation", async () => {
+test("source invariant: runtime has no result cache, shadow mode, wrappers, or prompt mutation", async () => {
   const source = await readFile(path.join(repoRoot, "index.ts"), "utf8");
   for (const forbidden of [
     "RiskRecord",
