@@ -50,6 +50,8 @@ Runtime behavior:
   startup hooks
 - `before_prompt_build` sends user prompt text as `USER_INPUT`
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
+- `before_tool_call` can return `{ block: true, blockReason }` only when
+  `shadowMode=false` and `blockMalicious=true`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes
@@ -58,8 +60,11 @@ Runtime behavior:
 - no classifier result is cached or consumed later
 - no warning, stub, prompt, system, or developer context is added
 - assistant output is not changed
-- no wrapper tools, exporters, queues, or enforcement behavior are registered
+- no wrapper tools, exporters, queues, or post-execution enforcement behavior
+  are registered
 - classifier errors fail open
+- raw prompt, tool input, and tool output text is not logged or returned in
+  block reasons
 
 Configuration fields:
 
@@ -68,6 +73,9 @@ Configuration fields:
   when `silmarilApiKey` is present
 - `apiUrl`: full Silmaril classify endpoint URL, ending in `/classify`
 - `timeoutMs`: optional classifier timeout in milliseconds; default `2500`
+- `shadowMode`: optional pass-through mode; default `true`
+- `blockMalicious`: optional malicious `before_tool_call` blocking; default
+  `false`; only effective when `shadowMode=false`
 
 Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
 OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
@@ -153,7 +161,9 @@ for direct source loading or the CLI install path is unavailable.
              "apiKey": "<PLUGIN_OR_LEGACY_SILMARIL_API_KEY>",
              "silmarilApiKey": "<SILMARIL_API_KEY>",
              "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify",
-             "timeoutMs": 2500
+             "timeoutMs": 2500,
+             "shadowMode": true,
+             "blockMalicious": false
            }
          }
        },

@@ -1,8 +1,10 @@
-# Pass-Through E2E Test Spec
+# Shadow/Enforcement E2E Test Spec
 
-This plugin is currently pass-through only. It sends OpenClaw hook payloads to
-the configured Silmaril classify endpoint, logs classifier results, and does not
-change OpenClaw behavior.
+By default this plugin is pass-through shadow mode. It sends OpenClaw hook
+payloads to the configured Silmaril classify endpoint, logs classifier results,
+and does not change OpenClaw behavior. Optional enforcement is limited to
+`before_tool_call` and requires both `shadowMode: false` and
+`blockMalicious: true`.
 
 ## Expected Plugin Shape
 
@@ -35,7 +37,9 @@ Configure:
         "config": {
           "silmarilApiKey": "<silmaril-api-key>",
           "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify",
-          "timeoutMs": 2500
+          "timeoutMs": 2500,
+          "shadowMode": true,
+          "blockMalicious": false
         }
       }
     },
@@ -64,6 +68,17 @@ firewall-plugin: installed
 
 If classifier config is missing, the plugin should warn once and log skipped
 classifications with `missing_config`.
+
+## Enforcement Smoke Flow
+
+Configure `shadowMode: false` and `blockMalicious: true`, then run a tool call
+that the classifier returns as malicious. Expected behavior:
+
+- `before_tool_call` returns `{ "block": true, "blockReason": "..." }`.
+- The block reason includes hook label, primary outcome, score, and threshold.
+- The block reason does not include raw prompt text, tool parameters, or tool
+  result text.
+- `before_prompt_build` and `tool_result_persist` still return `undefined`.
 
 ## Invariants
 

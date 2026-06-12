@@ -33,12 +33,13 @@ var index_default = definePluginEntry({
             firewall: new Firewall({
               apiKey: config.apiKey,
               apiUrl: config.apiUrl,
-              timeoutMs: config.timeoutMs
+              timeoutMs: config.timeoutMs,
+              shadowMode: config.shadowMode
             })
           }
         };
       }
-      return runtimeClient.state;
+      return runtimeClient;
     };
     api.on("gateway_start", () => {
       api.logger.info("firewall-plugin: installed");
@@ -55,7 +56,7 @@ var index_default = definePluginEntry({
         return;
       }
       try {
-        await classifyHookPayload(runtime.firewall, event.prompt, meta);
+        await classifyHookPayload(runtime.state.firewall, event.prompt, meta);
       } catch (err) {
         logError(meta, err);
       }
@@ -68,10 +69,17 @@ var index_default = definePluginEntry({
         return;
       }
       try {
-        await classifyHookPayload(runtime.firewall, safeStringify(event?.params ?? {}), meta);
+        const runtimeConfig = runtime.config;
+        const result = await classifyHookPayload(runtime.state.firewall, safeStringify(event?.params ?? {}), meta);
+        if (shouldBlockToolCall(runtimeConfig, result)) {
+          const block = buildBlockResult(result, meta);
+          logBlocked(meta, result);
+          return block;
+        }
       } catch (err) {
         logError(meta, err);
       }
+      return void 0;
     }, hookOptions);
     api.on("tool_result_persist", (event, ctx) => {
       const meta = buildHookLogMeta("tool_result_persist", HookLabel.TOOL_RESPONSE, event, ctx);
@@ -86,7 +94,7 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        void classifyHookPayload(runtime.firewall, text, meta).catch((err) => logError(meta, err));
+        void classifyHookPayload(runtime.state.firewall, text, meta).catch((err) => logError(meta, err));
       } catch (err) {
         logError(meta, err);
       }
@@ -94,7 +102,7 @@ var index_default = definePluginEntry({
   }
 });
 function sameRuntimeConfig(left, right) {
-  return left.apiKey === right.apiKey && left.apiUrl === right.apiUrl && left.timeoutMs === right.timeoutMs;
+  return left.apiKey === right.apiKey && left.apiUrl === right.apiUrl && left.timeoutMs === right.timeoutMs && left.shadowMode === right.shadowMode && left.blockMalicious === right.blockMalicious;
 }
 function resolveRuntimeConfig(rawConfig) {
   const config = readRecord(rawConfig);
@@ -110,7 +118,9 @@ function resolveRuntimeConfig(rawConfig) {
       config?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
       MAX_CLASSIFY_TIMEOUT_MS
-    ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS
+    ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS,
+    shadowMode: readBoolean(config?.shadowMode) ?? true,
+    blockMalicious: readBoolean(config?.blockMalicious) ?? false
   };
 }
 function readRecord(value) {
@@ -130,6 +140,22 @@ function readIntegerInRange(value, min, max) {
   }
   return integerValue;
 }
+function readBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return void 0;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return void 0;
+}
 async function classifyHookPayload(firewall, text, meta) {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -138,14 +164,45 @@ async function classifyHookPayload(firewall, text, meta) {
   }
   const result = await firewall.classify(text, {
     hook: meta.hook,
-    toolName: meta.toolName
+    toolName: meta.toolName,
+    metadata: {
+      eventType: meta.hookName,
+      ...logFields(meta)
+    }
   });
   console.log("[firewall] " + meta.hookName + " result:", JSON.stringify({
     ...logFields(meta),
     prediction: result.prediction,
-    score: result.score
+    score: result.score,
+    threshold: result.threshold,
+    primaryOutcome: result.primaryOutcome
   }));
   return result;
+}
+function shouldBlockToolCall(config, result) {
+  if (config.shadowMode || !config.blockMalicious || !result) {
+    return false;
+  }
+  if (result.primaryOutcome === "benign") {
+    return false;
+  }
+  if (result.prediction === "BENIGN") {
+    return false;
+  }
+  return result.score >= result.threshold;
+}
+function buildBlockResult(result, meta) {
+  const parts = [
+    "Silmaril Firewall blocked this tool call",
+    `hook=${meta.hook}`,
+    result.primaryOutcome ? `primaryOutcome=${result.primaryOutcome}` : void 0,
+    `score=${result.score}`,
+    `threshold=${result.threshold}`
+  ].filter((part) => typeof part === "string");
+  return {
+    block: true,
+    blockReason: parts.join("; ")
+  };
 }
 function buildHookLogMeta(hookName, hook, event, ctx) {
   const eventRecord = readRecord(event);
@@ -191,11 +248,57 @@ function logSkipped(meta, reason) {
     reason
   }));
 }
+function logBlocked(meta, result) {
+  console.log("[firewall] " + meta.hookName + " blocked:", JSON.stringify({
+    ...logFields(meta),
+    prediction: result.prediction,
+    score: result.score,
+    threshold: result.threshold,
+    primaryOutcome: result.primaryOutcome
+  }));
+}
 function logError(meta, err) {
   console.error("[firewall] " + meta.hookName + " error:", JSON.stringify({
     ...logFields(meta),
-    error: err instanceof Error ? err.message : String(err)
+    ...safeErrorFields(err)
   }));
+}
+function safeErrorFields(err) {
+  const fields = {
+    errorType: err instanceof Error ? err.name : typeof err
+  };
+  const record = readRecord(err);
+  const code = readString(record?.code);
+  if (code) {
+    fields.errorCode = code;
+  }
+  const status = typeof record?.status === "number" && Number.isFinite(record.status) ? record.status : void 0;
+  if (status !== void 0) {
+    fields.status = status;
+  }
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : void 0;
+  const safeMessage = safeErrorMessage(message);
+  if (safeMessage) {
+    fields.errorMessage = safeMessage;
+  }
+  return fields;
+}
+function safeErrorMessage(message) {
+  if (!message) {
+    return void 0;
+  }
+  const firstLine = message.split(/\r?\n/, 1)[0].replace(/["'][^"']{12,}["']/g, "[redacted]");
+  const statusMatch = firstLine.match(/\b(?:status|error)\s+([1-5][0-9]{2})\b/i);
+  if (statusMatch) {
+    return `response_status_${statusMatch[1]}`;
+  }
+  if (/\b(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/.test(firstLine)) {
+    return firstLine.slice(0, 160);
+  }
+  if (/\b(timeout|timed out|aborted|abort)\b/i.test(firstLine)) {
+    return "request_timeout";
+  }
+  return void 0;
 }
 function safeStringify(value) {
   const seen = /* @__PURE__ */ new WeakSet();
@@ -243,12 +346,18 @@ const __testInternals = {
   readRecord,
   readString,
   readIntegerInRange,
+  readBoolean,
   classifyHookPayload,
+  shouldBlockToolCall,
+  buildBlockResult,
   buildHookLogMeta,
   readTraceId,
   logFields,
   logSkipped,
+  logBlocked,
   logError,
+  safeErrorFields,
+  safeErrorMessage,
   safeStringify,
   extractToolResultText
 };

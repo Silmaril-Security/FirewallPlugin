@@ -18,6 +18,14 @@
         "minimum": 250,
         "maximum": 10000,
         "default": 2500
+      },
+      "shadowMode": {
+        "type": "boolean",
+        "default": true
+      },
+      "blockMalicious": {
+        "type": "boolean",
+        "default": false
       }
     }
   },
@@ -25,6 +33,8 @@
     "apiKey": { "label": "API Key", "sensitive": true },
     "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
     "apiUrl": { "label": "API URL" },
-    "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true }
+    "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
+    "shadowMode": { "label": "Shadow mode", "advanced": true },
+    "blockMalicious": { "label": "Block malicious pre-tool calls", "advanced": true }
   }
 }
