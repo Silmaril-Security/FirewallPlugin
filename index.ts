@@ -1,5 +1,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
+import type { BlockResult } from "@silmaril-security/sdk";
 
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -9,6 +10,8 @@ type RuntimeConfig = {
   apiKey: string;
   apiUrl: string;
   timeoutMs: number;
+  shadowMode: boolean;
+  blockMalicious: boolean;
 };
 
 type RuntimeState = {
@@ -32,6 +35,11 @@ type HookLogMeta = {
   messageId?: string;
   traceId?: string;
   idempotencyKey?: string;
+};
+
+type BeforeToolCallBlock = {
+  block: true;
+  blockReason: string;
 };
 
 export default definePluginEntry({
@@ -67,6 +75,7 @@ export default definePluginEntry({
               apiKey: config.apiKey,
               apiUrl: config.apiUrl,
               timeoutMs: config.timeoutMs,
+              shadowMode: config.shadowMode,
             }),
           },
         };
@@ -108,10 +117,16 @@ export default definePluginEntry({
       }
 
       try {
-        await classifyHookPayload(runtime.firewall, safeStringify(event?.params ?? {}), meta);
+        const result = await classifyHookPayload(runtime.firewall, safeStringify(event?.params ?? {}), meta);
+        if (shouldBlockToolCall(runtimeClient?.config, result)) {
+          const block = buildBlockResult(result, meta);
+          logBlocked(meta, result);
+          return block;
+        }
       } catch (err) {
         logError(meta, err);
       }
+      return undefined;
     }, hookOptions);
 
     api.on("tool_result_persist", (event, ctx) => {
@@ -141,7 +156,9 @@ export default definePluginEntry({
 function sameRuntimeConfig(left: RuntimeConfig, right: RuntimeConfig): boolean {
   return left.apiKey === right.apiKey
     && left.apiUrl === right.apiUrl
-    && left.timeoutMs === right.timeoutMs;
+    && left.timeoutMs === right.timeoutMs
+    && left.shadowMode === right.shadowMode
+    && left.blockMalicious === right.blockMalicious;
 }
 
 function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
@@ -160,6 +177,8 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
       MIN_CLASSIFY_TIMEOUT_MS,
       MAX_CLASSIFY_TIMEOUT_MS,
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS,
+    shadowMode: readBoolean(config?.shadowMode) ?? true,
+    blockMalicious: readBoolean(config?.blockMalicious) ?? false,
   };
 }
 
@@ -187,11 +206,28 @@ function readIntegerInRange(value: unknown, min: number, max: number): number | 
   return integerValue;
 }
 
+function readBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
+}
+
 async function classifyHookPayload(
   firewall: Firewall,
   text: string,
   meta: HookLogMeta,
-): Promise<{ prediction?: unknown; score?: unknown } | undefined> {
+): Promise<BlockResult | undefined> {
   const trimmed = text.trim();
   if (!trimmed) {
     logSkipped(meta, "empty_payload");
@@ -201,13 +237,46 @@ async function classifyHookPayload(
   const result = await firewall.classify(text, {
     hook: meta.hook,
     toolName: meta.toolName,
+    metadata: {
+      eventType: meta.hookName,
+      ...logFields(meta),
+    },
   });
   console.log("[firewall] " + meta.hookName + " result:", JSON.stringify({
     ...logFields(meta),
     prediction: result.prediction,
     score: result.score,
+    threshold: result.threshold,
+    primaryOutcome: result.primaryOutcome,
   }));
   return result;
+}
+
+function shouldBlockToolCall(config: RuntimeConfig | undefined, result: BlockResult | undefined): boolean {
+  if (!config || config.shadowMode || !config.blockMalicious || !result) {
+    return false;
+  }
+  if (result.prediction === "MALICIOUS") {
+    return true;
+  }
+  if (result.primaryOutcome === "benign") {
+    return false;
+  }
+  return result.score >= result.threshold && typeof result.primaryOutcome === "string";
+}
+
+function buildBlockResult(result: BlockResult, meta: HookLogMeta): BeforeToolCallBlock {
+  const parts = [
+    "Silmaril Firewall blocked this tool call",
+    `hook=${meta.hook}`,
+    result.primaryOutcome ? `primaryOutcome=${result.primaryOutcome}` : undefined,
+    `score=${result.score}`,
+    `threshold=${result.threshold}`,
+  ].filter((part): part is string => typeof part === "string");
+  return {
+    block: true,
+    blockReason: parts.join("; "),
+  };
 }
 
 function buildHookLogMeta(hookName: string, hook: HookLabel, event: unknown, ctx: unknown): HookLogMeta {
@@ -258,10 +327,20 @@ function logSkipped(meta: HookLogMeta, reason: string): void {
   }));
 }
 
+function logBlocked(meta: HookLogMeta, result: BlockResult): void {
+  console.log("[firewall] " + meta.hookName + " blocked:", JSON.stringify({
+    ...logFields(meta),
+    prediction: result.prediction,
+    score: result.score,
+    threshold: result.threshold,
+    primaryOutcome: result.primaryOutcome,
+  }));
+}
+
 function logError(meta: HookLogMeta, err: unknown): void {
   console.error("[firewall] " + meta.hookName + " error:", JSON.stringify({
     ...logFields(meta),
-    error: err instanceof Error ? err.message : String(err),
+    errorType: err instanceof Error ? err.name : typeof err,
   }));
 }
 
@@ -315,11 +394,15 @@ export const __testInternals = {
   readRecord,
   readString,
   readIntegerInRange,
+  readBoolean,
   classifyHookPayload,
+  shouldBlockToolCall,
+  buildBlockResult,
   buildHookLogMeta,
   readTraceId,
   logFields,
   logSkipped,
+  logBlocked,
   logError,
   safeStringify,
   extractToolResultText,

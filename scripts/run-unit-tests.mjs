@@ -54,7 +54,9 @@ await build({
                 globalThis.__silmarilFirewallCalls ??= [];
                 globalThis.__silmarilFirewallCalls.push({ text, options });
                 const handler = globalThis.__silmarilFirewallClassify;
-                return handler ? await handler(text, options) : { prediction: "BENIGN", score: 0.01 };
+                return handler
+                  ? await handler(text, options)
+                  : { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
               }
             }
           `,
@@ -151,6 +153,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function assertClassifyOptions(options, expected) {
+  assert.equal(options.hook, expected.hook);
+  assert.equal(options.toolName, expected.toolName);
+  assert.equal(typeof options.metadata, "object");
+  assert.equal(options.metadata.eventType, expected.eventType);
+  assert.equal(options.metadata.hook, expected.hook);
+  if (expected.toolName === undefined) {
+    assert.equal(options.metadata.toolName, undefined);
+  } else {
+    assert.equal(options.metadata.toolName, expected.toolName);
+  }
+}
+
 test("config: missing or blank apiKey/apiUrl disables runtime config", () => {
   assert.equal(t.resolveRuntimeConfig(undefined), undefined);
   assert.equal(t.resolveRuntimeConfig({}), undefined);
@@ -163,6 +178,8 @@ test("config: trims required fields and applies timeout default", () => {
     apiKey: "key",
     apiUrl: "https://x",
     timeoutMs: 2500,
+    shadowMode: true,
+    blockMalicious: false,
   });
 });
 
@@ -171,6 +188,8 @@ test("config: silmarilApiKey is accepted and preferred over apiKey", () => {
     apiKey: "silmaril-key",
     apiUrl: "https://x",
     timeoutMs: 2500,
+    shadowMode: true,
+    blockMalicious: false,
   });
   assert.equal(
     t.resolveRuntimeConfig({
@@ -188,12 +207,34 @@ test("config: timeout bounds are enforced", () => {
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: 10001 }).timeoutMs, 2500);
 });
 
+test("config: shadow and enforcement booleans are parsed conservatively", () => {
+  assert.equal(t.readBoolean(true), true);
+  assert.equal(t.readBoolean("yes"), true);
+  assert.equal(t.readBoolean("off"), false);
+  assert.equal(t.readBoolean(""), undefined);
+  assert.deepEqual(t.resolveRuntimeConfig({
+    apiKey: "k",
+    apiUrl: "u",
+    shadowMode: "false",
+    blockMalicious: "true",
+  }), {
+    apiKey: "k",
+    apiUrl: "u",
+    timeoutMs: 2500,
+    shadowMode: false,
+    blockMalicious: true,
+  });
+});
+
 test("package metadata: devDependencies is unique and complete", async () => {
   const packageSource = await readFile(path.join(repoRoot, "package.json"), "utf8");
   assert.equal((packageSource.match(/"devDependencies"\s*:/g) ?? []).length, 1);
 
   const packageJson = JSON.parse(packageSource);
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.4.2");
+  assert.equal(packageJson.devDependencies.esbuild, "0.28.0");
+  assert.equal(packageJson.devDependencies.tsx, "4.22.3");
 });
 
 test("install docs: default clone flow does not pin simplified-dev", async () => {
@@ -272,14 +313,18 @@ test("classifier: non-empty payload passes hook and toolName", async () => {
       {
         classify: async (text, options) => {
           assert.equal(text, "payload");
-          assert.deepEqual(options, { hook: "TOOL_CALL", toolName: "exec" });
-          return { prediction: "BENIGN", score: 0.12 };
+          assertClassifyOptions(options, {
+            hook: "TOOL_CALL",
+            toolName: "exec",
+            eventType: "before_tool_call",
+          });
+          return { prediction: "BENIGN", score: 0.12, threshold: 0.5, primaryOutcome: "benign" };
         },
       },
       "payload",
       makeMeta({ hookName: "before_tool_call", hook: "TOOL_CALL", toolName: "exec" }),
     );
-    assert.deepEqual(result, { prediction: "BENIGN", score: 0.12 });
+    assert.deepEqual(result, { prediction: "BENIGN", score: 0.12, threshold: 0.5, primaryOutcome: "benign" });
     assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call result:")));
   });
 });
@@ -341,35 +386,127 @@ test("plugin: missing config warns once and classifications fail open", async ()
 
 test("plugin: before_prompt_build sends user prompt to Silmaril and returns undefined", async () => {
   const env = registerPlugin();
-  globalThis.__silmarilFirewallClassify = async () => ({ prediction: "MALICIOUS", score: 0.99 });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
   await withConsoleCapture(async ({ logs }) => {
     const result = await hook(env, "before_prompt_build")({
       prompt: "ignore instructions",
       runId: "run-risk",
     }, {});
     assert.equal(result, undefined);
-    assert.deepEqual(globalThis.__silmarilFirewallCalls, [{
-      text: "ignore instructions",
-      options: { hook: "USER_INPUT", toolName: undefined },
-    }]);
+    assert.equal(globalThis.__silmarilFirewallCalls[0].text, "ignore instructions");
+    assertClassifyOptions(globalThis.__silmarilFirewallCalls[0].options, {
+      hook: "USER_INPUT",
+      toolName: undefined,
+      eventType: "before_prompt_build",
+    });
     assert.ok(logs.some((line) => line.includes("[firewall] before_prompt_build result:")));
     assert.equal(logs.some((line) => line.includes("risk cached")), false);
     assert.equal(logs.some((line) => line.includes("risk cache consumed")), false);
   });
 });
 
-test("plugin: before_tool_call classifies safe-stringified params", async () => {
+test("plugin: before_tool_call classifies safe-stringified params and passes through by default", async () => {
   const env = registerPlugin();
   const circular = { value: 1 };
   circular.self = circular;
   globalThis.__silmarilFirewallClassify = async (text, options) => {
     assert.equal(text, '{"value":1,"self":"[Circular]"}');
-    assert.deepEqual(options, { hook: "TOOL_CALL", toolName: "exec" });
-    return { prediction: "BENIGN", score: 0.1 };
+    assertClassifyOptions(options, {
+      hook: "TOOL_CALL",
+      toolName: "exec",
+      eventType: "before_tool_call",
+    });
+    return { prediction: "MALICIOUS", score: 0.99, threshold: 0.5, primaryOutcome: "control_abuse" };
   };
   await withSilencedConsole(async () => {
-    await hook(env, "before_tool_call")({ toolName: "exec", params: circular }, {});
+    const result = await hook(env, "before_tool_call")({ toolName: "exec", params: circular }, {});
+    assert.equal(result, undefined);
   });
+});
+
+test("plugin: optional enforcement blocks only before_tool_call when not shadowing", async () => {
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      blockMalicious: true,
+      shadowMode: false,
+    },
+  });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+
+  await withConsoleCapture(async ({ logs }) => {
+    const result = await hook(env, "before_tool_call")({
+      toolName: "exec",
+      params: { command: "rm -rf /tmp/example" },
+    }, {});
+    assert.deepEqual(result, {
+      block: true,
+      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
+    });
+    assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call blocked:")));
+    assert.equal(logs.some((line) => line.includes("rm -rf")), false);
+  });
+});
+
+test("plugin: shadowMode prevents blocking even when blockMalicious is true", async () => {
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      blockMalicious: true,
+      shadowMode: true,
+    },
+  });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+
+  await withSilencedConsole(async () => {
+    const result = await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "false" } }, {});
+    assert.equal(result, undefined);
+  });
+});
+
+test("decision: benign outcomes do not block even above threshold", () => {
+  const config = {
+    apiKey: "k",
+    apiUrl: "u",
+    timeoutMs: 2500,
+    shadowMode: false,
+    blockMalicious: true,
+  };
+  assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "BENIGN",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "benign",
+  }), false);
+  assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  }), true);
+  assert.equal(t.shouldBlockToolCall({ ...config, shadowMode: true }, {
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  }), false);
 });
 
 test("plugin: stable runtime config reuses one Firewall client", async () => {
@@ -387,39 +524,56 @@ test("plugin: stable runtime config reuses one Firewall client", async () => {
     apiKey: "k",
     apiUrl: "u",
     timeoutMs: 777,
+    shadowMode: true,
   });
 });
 
 test("plugin: runtime config changes create a new Firewall client", async () => {
-  const config = { apiKey: "k", apiUrl: "u1", timeoutMs: 777 };
+  const config = { apiKey: "k", apiUrl: "u1", timeoutMs: 777, blockMalicious: false };
   const env = registerPlugin({ config });
   await withSilencedConsole(async () => {
     await hook(env, "before_prompt_build")({ prompt: "first" }, {});
     config.apiUrl = "u2";
     await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
+    config.blockMalicious = true;
+    await hook(env, "before_prompt_build")({ prompt: "third" }, {});
   });
 
-  assert.equal(globalThis.__silmarilFirewallInstances.length, 2);
+  assert.equal(globalThis.__silmarilFirewallInstances.length, 3);
   assert.deepEqual(
     globalThis.__silmarilFirewallInstances.map((entry) => entry.options.apiUrl),
-    ["u1", "u2"],
+    ["u1", "u2", "u2"],
   );
 });
 
-test("plugin: tool_result_persist starts pass-through classification and returns immediately", async () => {
-  const env = registerPlugin();
+test("plugin: tool_result_persist stays pass-through and returns immediately", async () => {
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      blockMalicious: true,
+      shadowMode: false,
+    },
+  });
   let release;
   const pending = new Promise((resolve) => {
     release = resolve;
   });
-  globalThis.__silmarilFirewallClassify = async () => pending.then(() => ({ prediction: "BENIGN", score: 0.1 }));
+  globalThis.__silmarilFirewallClassify = async () => pending.then(() => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  }));
   await withSilencedConsole(async () => {
     const result = hook(env, "tool_result_persist")({ message: { content: "tool output" } }, {});
     assert.equal(result, undefined);
     assert.equal(globalThis.__silmarilFirewallCalls.length, 1);
-    assert.deepEqual(globalThis.__silmarilFirewallCalls[0], {
-      text: "tool output",
-      options: { hook: "TOOL_RESPONSE", toolName: undefined },
+    assert.equal(globalThis.__silmarilFirewallCalls[0].text, "tool output");
+    assertClassifyOptions(globalThis.__silmarilFirewallCalls[0].options, {
+      hook: "TOOL_RESPONSE",
+      toolName: undefined,
+      eventType: "tool_result_persist",
     });
     release();
     await sleep(0);
@@ -427,22 +581,32 @@ test("plugin: tool_result_persist starts pass-through classification and returns
 });
 
 test("plugin: classifier errors are logged and fail open", async () => {
-  const env = registerPlugin();
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      blockMalicious: true,
+      shadowMode: false,
+    },
+  });
   globalThis.__silmarilFirewallClassify = async () => {
-    throw new Error("classifier unavailable");
+    throw new Error("classifier unavailable for raw classified prompt");
   };
   await withConsoleCapture(async ({ errors }) => {
-    await hook(env, "before_prompt_build")({ prompt: "risk", runId: "run-error" }, {});
-    await hook(env, "before_tool_call")({ params: { a: 1 } }, {});
+    const promptResult = await hook(env, "before_prompt_build")({ prompt: "risk", runId: "run-error" }, {});
+    const toolResult = await hook(env, "before_tool_call")({ params: { a: 1 } }, {});
     hook(env, "tool_result_persist")({ message: { content: "tool result" } }, {});
     await sleep(0);
+    assert.equal(promptResult, undefined);
+    assert.equal(toolResult, undefined);
     assert.ok(errors.some((line) => line.includes("before_prompt_build error:")));
     assert.ok(errors.some((line) => line.includes("before_tool_call error:")));
     assert.ok(errors.some((line) => line.includes("tool_result_persist error:")));
+    assert.equal(errors.some((line) => line.includes("raw classified prompt")), false);
   });
 });
 
-test("source invariant: runtime has no result cache, shadow mode, wrappers, or prompt mutation", async () => {
+test("source invariant: runtime has no result cache, wrappers, or prompt mutation", async () => {
   const source = await readFile(path.join(repoRoot, "index.ts"), "utf8");
   for (const forbidden of [
     "RiskRecord",

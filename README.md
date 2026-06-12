@@ -5,7 +5,9 @@ Silmaril classification for OpenClaw plugin hooks.
 The plugin observes OpenClaw prompt, tool-call, and tool-result hook payloads,
 sends them to a Silmaril classify endpoint, and logs the returned prediction and
 score. Runtime behavior is fail-open: classifier errors are logged, then
-OpenClaw execution continues.
+OpenClaw execution continues. Optional enforcement is available only for the
+pre-execution `before_tool_call` hook. It requires both `shadowMode: false` and
+`blockMalicious: true`; all other hooks remain pass-through.
 
 The plugin targets OpenClaw plugin API `2026.5.18` and newer. Its manifest
 declares startup activation for hook capability loading, and the runtime entry
@@ -17,7 +19,7 @@ registers typed Gateway hooks with `api.on(...)`.
 |---|---|---|
 | `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
 | `before_prompt_build` | `USER_INPUT` | User prompt text |
-| `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters |
+| `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters; can return `{ "block": true, "blockReason": "..." }` when enforcement is explicitly enabled |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
 
 Hook registration is unconditional, so OpenClaw can discover and invoke the
@@ -28,7 +30,10 @@ is resolved inside each hook call.
 with a plugin-owned timeout. `tool_result_persist` is a synchronous OpenClaw
 hook, so the plugin starts a fail-open classification request and returns
 immediately. The result is logged when the classifier call completes.
-Image-only and other empty tool results are skipped.
+Image-only and other empty tool results are skipped. Logs include hook label,
+event type, tool/correlation identifiers when available, prediction, score,
+threshold, and primary outcome. Raw prompts, tool parameters, and tool results
+are not printed to logs or returned in block reasons.
 
 ## Files
 
@@ -62,7 +67,9 @@ the rest of the user's OpenClaw config and add the absolute repository path to
           "apiKey": "your-plugin-or-legacy-silmaril-api-key",
           "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify",
-          "timeoutMs": 2500
+          "timeoutMs": 2500,
+          "shadowMode": true,
+          "blockMalicious": false
         }
       }
     },
@@ -81,12 +88,17 @@ legacy fallback and may otherwise be used as a plugin or OpenClaw identity key.
 `timeoutMs` is optional. It defaults to `2500` and bounds each classifier
 request.
 
+`shadowMode` defaults to `true` and preserves pass-through behavior. To enable
+pre-tool blocking, set both `shadowMode: false` and `blockMalicious: true`.
+Blocking uses OpenClaw's documented `before_tool_call` decision shape and never
+retroactively blocks persisted tool results.
+
 Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
 OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
 that setting blocks the hook registration.
 
-The plugin is pass-through only. It does not cache classifier results, block
-execution, add prompt/system/developer context, change assistant output, or
+By default the plugin is pass-through only. It does not cache classifier
+results, add prompt/system/developer context, change assistant output, or
 register wrapper tools.
 
 
