@@ -56,7 +56,7 @@ export default definePluginEntry({
     let missingConfigWarned = false;
     let runtimeClient: RuntimeClient | undefined;
 
-    const getRuntime = (): RuntimeState | undefined => {
+    const getRuntime = (): RuntimeClient | undefined => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
         if (!missingConfigWarned) {
@@ -81,7 +81,7 @@ export default definePluginEntry({
         };
       }
 
-      return runtimeClient.state;
+      return runtimeClient;
     };
 
     api.on("gateway_start", () => {
@@ -102,7 +102,7 @@ export default definePluginEntry({
       }
 
       try {
-        await classifyHookPayload(runtime.firewall, event.prompt, meta);
+        await classifyHookPayload(runtime.state.firewall, event.prompt, meta);
       } catch (err) {
         logError(meta, err);
       }
@@ -117,8 +117,9 @@ export default definePluginEntry({
       }
 
       try {
-        const result = await classifyHookPayload(runtime.firewall, safeStringify(event?.params ?? {}), meta);
-        if (shouldBlockToolCall(runtimeClient?.config, result)) {
+        const runtimeConfig = runtime.config;
+        const result = await classifyHookPayload(runtime.state.firewall, safeStringify(event?.params ?? {}), meta);
+        if (shouldBlockToolCall(runtimeConfig, result)) {
           const block = buildBlockResult(result, meta);
           logBlocked(meta, result);
           return block;
@@ -144,7 +145,7 @@ export default definePluginEntry({
           return;
         }
 
-        void classifyHookPayload(runtime.firewall, text, meta)
+        void classifyHookPayload(runtime.state.firewall, text, meta)
           .catch((err) => logError(meta, err));
       } catch (err) {
         logError(meta, err);
@@ -252,17 +253,17 @@ async function classifyHookPayload(
   return result;
 }
 
-function shouldBlockToolCall(config: RuntimeConfig | undefined, result: BlockResult | undefined): boolean {
-  if (!config || config.shadowMode || !config.blockMalicious || !result) {
+function shouldBlockToolCall(config: RuntimeConfig, result: BlockResult | undefined): result is BlockResult {
+  if (config.shadowMode || !config.blockMalicious || !result) {
     return false;
-  }
-  if (result.prediction === "MALICIOUS") {
-    return true;
   }
   if (result.primaryOutcome === "benign") {
     return false;
   }
-  return result.score >= result.threshold && typeof result.primaryOutcome === "string";
+  if (result.prediction === "BENIGN") {
+    return false;
+  }
+  return result.score >= result.threshold;
 }
 
 function buildBlockResult(result: BlockResult, meta: HookLogMeta): BeforeToolCallBlock {
@@ -340,8 +341,49 @@ function logBlocked(meta: HookLogMeta, result: BlockResult): void {
 function logError(meta: HookLogMeta, err: unknown): void {
   console.error("[firewall] " + meta.hookName + " error:", JSON.stringify({
     ...logFields(meta),
-    errorType: err instanceof Error ? err.name : typeof err,
+    ...safeErrorFields(err),
   }));
+}
+
+function safeErrorFields(err: unknown): Record<string, string | number> {
+  const fields: Record<string, string | number> = {
+    errorType: err instanceof Error ? err.name : typeof err,
+  };
+  const record = readRecord(err);
+  const code = readString(record?.code);
+  if (code) {
+    fields.errorCode = code;
+  }
+  const status = typeof record?.status === "number" && Number.isFinite(record.status)
+    ? record.status
+    : undefined;
+  if (status !== undefined) {
+    fields.status = status;
+  }
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
+  const safeMessage = safeErrorMessage(message);
+  if (safeMessage) {
+    fields.errorMessage = safeMessage;
+  }
+  return fields;
+}
+
+function safeErrorMessage(message: string | undefined): string | undefined {
+  if (!message) {
+    return undefined;
+  }
+  const firstLine = message.split(/\r?\n/, 1)[0].replace(/["'][^"']{12,}["']/g, "[redacted]");
+  const statusMatch = firstLine.match(/\b(?:status|error)\s+([1-5][0-9]{2})\b/i);
+  if (statusMatch) {
+    return `response_status_${statusMatch[1]}`;
+  }
+  if (/\b(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/.test(firstLine)) {
+    return firstLine.slice(0, 160);
+  }
+  if (/\b(timeout|timed out|aborted|abort)\b/i.test(firstLine)) {
+    return "request_timeout";
+  }
+  return undefined;
 }
 
 function safeStringify(value: unknown): string {
@@ -404,6 +446,8 @@ export const __testInternals = {
   logSkipped,
   logBlocked,
   logError,
+  safeErrorFields,
+  safeErrorMessage,
   safeStringify,
   extractToolResultText,
 };

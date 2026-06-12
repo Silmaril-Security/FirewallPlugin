@@ -496,6 +496,18 @@ test("decision: benign outcomes do not block even above threshold", () => {
     primaryOutcome: "benign",
   }), false);
   assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "BENIGN",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  }), false);
+  assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "MALICIOUS",
+    score: 0.1,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  }), false);
+  assert.equal(t.shouldBlockToolCall(config, {
     prediction: "MALICIOUS",
     score: 0.99,
     threshold: 0.5,
@@ -507,6 +519,36 @@ test("decision: benign outcomes do not block even above threshold", () => {
     threshold: 0.5,
     primaryOutcome: "control_abuse",
   }), false);
+});
+
+test("plugin: before_tool_call uses config captured before classifier await", async () => {
+  const config = {
+    apiKey: "k",
+    apiUrl: "u",
+    blockMalicious: true,
+    shadowMode: false,
+  };
+  const env = registerPlugin({ config });
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  globalThis.__silmarilFirewallClassify = async () => pending;
+
+  await withSilencedConsole(async () => {
+    const call = hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
+    config.shadowMode = true;
+    release({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      primaryOutcome: "control_abuse",
+    });
+    assert.deepEqual(await call, {
+      block: true,
+      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
+    });
+  });
 });
 
 test("plugin: stable runtime config reuses one Firewall client", async () => {
@@ -603,6 +645,27 @@ test("plugin: classifier errors are logged and fail open", async () => {
     assert.ok(errors.some((line) => line.includes("before_tool_call error:")));
     assert.ok(errors.some((line) => line.includes("tool_result_persist error:")));
     assert.equal(errors.some((line) => line.includes("raw classified prompt")), false);
+  });
+});
+
+test("logging: error diagnostics keep safe details and redact unknown messages", () => {
+  const networkError = Object.assign(
+    new Error("connect ECONNREFUSED 127.0.0.1:443"),
+    { code: "ECONNREFUSED" },
+  );
+  assert.deepEqual(t.safeErrorFields(networkError), {
+    errorType: "Error",
+    errorCode: "ECONNREFUSED",
+    errorMessage: "connect ECONNREFUSED 127.0.0.1:443",
+  });
+  const statusError = Object.assign(new Error("Response status 401"), { status: 401 });
+  assert.deepEqual(t.safeErrorFields(statusError), {
+    errorType: "Error",
+    status: 401,
+    errorMessage: "response_status_401",
+  });
+  assert.deepEqual(t.safeErrorFields(new Error("classifier saw raw classified prompt")), {
+    errorType: "Error",
   });
 });
 
