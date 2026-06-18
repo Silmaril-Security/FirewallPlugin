@@ -1,0 +1,129 @@
+import os from "node:os";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const DEFAULT_DEMO_BASE_URL = "https://app.silmaril.dev";
+const ROUTES = {
+  setup: "/demo/setup-complete",
+  playground: "/demo/playground",
+};
+
+function hasFlag(name) {
+  return process.argv.includes(name);
+}
+
+function optionValue(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function normalizeBaseUrl(value) {
+  const raw = (value || DEFAULT_DEMO_BASE_URL).trim();
+  return raw.startsWith("http://") || raw.startsWith("https://")
+    ? raw
+    : `https://${raw}`;
+}
+
+function normalizeRoute(value) {
+  return value === "playground" ? "playground" : "setup";
+}
+
+function routeFromCli() {
+  return hasFlag("--playground") ? "playground" : normalizeRoute(optionValue("--route"));
+}
+
+export function buildDemoUrl(baseUrl, route = "setup") {
+  return new URL(ROUTES[normalizeRoute(route)], normalizeBaseUrl(baseUrl)).href;
+}
+
+export function resolveRuntimeConfig(config = {}) {
+  const apiUrl = readString(config.apiUrl);
+  const apiKey = readString(config.silmarilApiKey) ?? readString(config.apiKey);
+  return {
+    configured: Boolean(apiUrl && apiKey),
+    apiUrl,
+    hasApiKey: Boolean(apiKey),
+  };
+}
+
+function readString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function openerCommand(url) {
+  if (process.platform === "darwin") {
+    return { command: "open", args: [url], options: { detached: true, stdio: "ignore" } };
+  }
+
+  if (process.platform === "win32") {
+    return {
+      command: "cmd",
+      args: ["/c", "start", "", url],
+      options: { detached: true, stdio: "ignore", windowsHide: true },
+    };
+  }
+
+  return { command: "xdg-open", args: [url], options: { detached: true, stdio: "ignore" } };
+}
+
+async function printOrOpen(url, config) {
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify({
+      url,
+      configured: config.configured,
+      apiUrl: config.apiUrl,
+      hasApiKey: config.hasApiKey,
+    }));
+  } else {
+    console.log(url);
+  }
+
+  if (hasFlag("--open")) {
+    const { command, args, options } = openerCommand(url);
+    try {
+      const child = spawn(command, args, options);
+      child.unref();
+    } catch (error) {
+      console.error(`Could not open browser with ${command}: ${error.message}`);
+      process.exitCode = 1;
+    }
+  }
+}
+
+function printHelp() {
+  console.log("Usage: node scripts/open-playground.mjs [--open] [--json] [--playground] [--route <setup|playground>]");
+  console.log("");
+  console.log("Prints the public Silmaril Firewall demo URL.");
+  console.log("Override the hosted base URL with SILMARIL_DEMO_BASE_URL for preview validation.");
+  console.log("Pass OpenClaw plugin config as JSON through OPENCLAW_FIREWALL_PLUGIN_CONFIG for JSON status.");
+  console.log(`Platform: ${os.platform()}`);
+}
+
+function readConfigFromEnv() {
+  const rawConfig = process.env.OPENCLAW_FIREWALL_PLUGIN_CONFIG;
+  if (!rawConfig) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(rawConfig);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function main() {
+  if (hasFlag("--help") || hasFlag("-h")) {
+    printHelp();
+    return;
+  }
+
+  const demoBaseUrl = normalizeBaseUrl(process.env.SILMARIL_DEMO_BASE_URL ?? DEFAULT_DEMO_BASE_URL);
+  const route = routeFromCli();
+  const config = resolveRuntimeConfig(readConfigFromEnv());
+  await printOrOpen(buildDemoUrl(demoBaseUrl, route), config);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

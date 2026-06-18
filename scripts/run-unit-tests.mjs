@@ -112,6 +112,10 @@ async function withSilencedConsole(fn) {
   }
 }
 
+async function loadDemoLauncher() {
+  return import(`${pathToFileURL(path.join(repoRoot, "scripts", "open-playground.mjs")).href}?${Date.now()}`);
+}
+
 function resetFirewallStub() {
   delete globalThis.__silmarilFirewallClassify;
   globalThis.__silmarilFirewallCalls = [];
@@ -231,6 +235,8 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.equal((packageSource.match(/"devDependencies"\s*:/g) ?? []).length, 1);
 
   const packageJson = JSON.parse(packageSource);
+  assert.ok(packageJson.files.includes(".env.example"));
+  assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.4.2");
   assert.equal(packageJson.devDependencies.esbuild, "0.28.0");
@@ -244,6 +250,29 @@ test("install docs: default clone flow does not pin simplified-dev", async () =>
     assert.equal(source.includes("git checkout simplified-dev"), false);
     assert.equal(source.includes("select the simplified branch"), false);
   }
+});
+
+test("demo launcher: builds public setup and playground URLs only", async () => {
+  const demo = await loadDemoLauncher();
+  assert.equal(demo.buildDemoUrl(undefined), "https://app.silmaril.dev/demo/setup-complete");
+  assert.equal(demo.buildDemoUrl("app.silmaril.dev", "playground"), "https://app.silmaril.dev/demo/playground");
+  assert.equal(demo.buildDemoUrl("http://localhost:3001", "setup"), "http://localhost:3001/demo/setup-complete");
+});
+
+test("demo launcher: JSON status omits raw API keys", async () => {
+  const demo = await loadDemoLauncher();
+  assert.deepEqual(demo.resolveRuntimeConfig({
+    apiUrl: " https://tenant.example/classify ",
+    silmarilApiKey: "secret-key",
+  }), {
+    configured: true,
+    apiUrl: "https://tenant.example/classify",
+    hasApiKey: true,
+  });
+  assert.equal(JSON.stringify(demo.resolveRuntimeConfig({
+    apiUrl: "https://tenant.example/classify",
+    silmarilApiKey: "secret-key",
+  })).includes("secret-key"), false);
 });
 
 test("primitive parsing handles strings and integers", () => {
