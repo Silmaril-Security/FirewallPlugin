@@ -70,7 +70,7 @@ function openerCommand(url) {
   return { command: "xdg-open", args: [url], options: { detached: true, stdio: "ignore" } };
 }
 
-async function printOrOpen(url, config) {
+export async function printOrOpen(url, config, spawnImpl = spawn) {
   if (hasFlag("--json")) {
     console.log(JSON.stringify({
       url,
@@ -85,7 +85,11 @@ async function printOrOpen(url, config) {
   if (hasFlag("--open")) {
     const { command, args, options } = openerCommand(url);
     try {
-      const child = spawn(command, args, options);
+      const child = spawnImpl(command, args, options);
+      child.on("error", (error) => {
+        console.error(`Could not open browser with ${command}: ${error.message}`);
+        process.exitCode = 1;
+      });
       child.unref();
     } catch (error) {
       console.error(`Could not open browser with ${command}: ${error.message}`);

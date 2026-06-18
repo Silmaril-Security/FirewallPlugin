@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdir, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -288,6 +289,39 @@ test("demo launcher: JSON status omits raw API keys", async () => {
     apiUrl: "https://tenant.example/classify",
     silmarilApiKey: "secret-key",
   })).includes("secret-key"), false);
+});
+
+test("demo launcher: opener ENOENT is handled without an unhandled error", async () => {
+  const demo = await loadDemoLauncher();
+  const originalArgv = process.argv;
+  const originalExitCode = process.exitCode;
+  try {
+    process.argv = ["node", "scripts/open-playground.mjs", "--open"];
+    process.exitCode = undefined;
+
+    await withConsoleCapture(async ({ logs, errors }) => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      let openerCommand;
+
+      await demo.printOrOpen("https://app.silmaril.dev/demo/setup-complete", {
+        configured: false,
+        hasApiKey: false,
+      }, (command) => {
+        openerCommand = command;
+        setImmediate(() => child.emit("error", new Error("missing opener")));
+        return child;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(logs, ["https://app.silmaril.dev/demo/setup-complete"]);
+      assert.deepEqual(errors, [`Could not open browser with ${openerCommand}: missing opener`]);
+      assert.equal(process.exitCode, 1);
+    });
+  } finally {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
+  }
 });
 
 test("primitive parsing handles strings and integers", () => {
