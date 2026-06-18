@@ -12,13 +12,17 @@ function hasFlag(name) {
   return process.argv.includes(name);
 }
 
-function optionValue(name) {
+export function optionValue(name) {
   const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
+  if (index < 0) {
+    return undefined;
+  }
+  const next = process.argv[index + 1];
+  return next && !next.startsWith("--") ? next : undefined;
 }
 
 function normalizeBaseUrl(value) {
-  const raw = (value || DEFAULT_DEMO_BASE_URL).trim();
+  const raw = (value || "").trim() || DEFAULT_DEMO_BASE_URL;
   return raw.startsWith("http://") || raw.startsWith("https://")
     ? raw
     : `https://${raw}`;
@@ -118,7 +122,7 @@ async function main() {
     return;
   }
 
-  const demoBaseUrl = normalizeBaseUrl(process.env.SILMARIL_DEMO_BASE_URL ?? DEFAULT_DEMO_BASE_URL);
+  const demoBaseUrl = process.env.SILMARIL_DEMO_BASE_URL ?? DEFAULT_DEMO_BASE_URL;
   const route = routeFromCli();
   const config = resolveRuntimeConfig(readConfigFromEnv());
   await printOrOpen(buildDemoUrl(demoBaseUrl, route), config);

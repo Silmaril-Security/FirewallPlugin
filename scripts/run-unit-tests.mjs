@@ -257,6 +257,21 @@ test("demo launcher: builds public setup and playground URLs only", async () => 
   assert.equal(demo.buildDemoUrl(undefined), "https://app.silmaril.dev/demo/setup-complete");
   assert.equal(demo.buildDemoUrl("app.silmaril.dev", "playground"), "https://app.silmaril.dev/demo/playground");
   assert.equal(demo.buildDemoUrl("http://localhost:3001", "setup"), "http://localhost:3001/demo/setup-complete");
+  assert.equal(demo.buildDemoUrl("   "), "https://app.silmaril.dev/demo/setup-complete");
+});
+
+test("demo launcher: option values do not consume another flag", async () => {
+  const demo = await loadDemoLauncher();
+  const originalArgv = process.argv;
+  try {
+    process.argv = ["node", "scripts/open-playground.mjs", "--route", "--json"];
+    assert.equal(demo.optionValue("--route"), undefined);
+
+    process.argv = ["node", "scripts/open-playground.mjs", "--route", "playground", "--json"];
+    assert.equal(demo.optionValue("--route"), "playground");
+  } finally {
+    process.argv = originalArgv;
+  }
 });
 
 test("demo launcher: JSON status omits raw API keys", async () => {
