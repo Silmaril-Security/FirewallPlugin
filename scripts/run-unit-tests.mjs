@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdir, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -110,6 +111,10 @@ async function withSilencedConsole(fn) {
     console.log = originalLog;
     console.error = originalError;
   }
+}
+
+async function loadDemoLauncher() {
+  return import(`${pathToFileURL(path.join(repoRoot, "scripts", "open-playground.mjs")).href}?${Date.now()}`);
 }
 
 function resetFirewallStub() {
@@ -231,6 +236,8 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.equal((packageSource.match(/"devDependencies"\s*:/g) ?? []).length, 1);
 
   const packageJson = JSON.parse(packageSource);
+  assert.ok(packageJson.files.includes(".env.example"));
+  assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.4.2");
   assert.equal(packageJson.devDependencies.esbuild, "0.28.0");
@@ -243,6 +250,77 @@ test("install docs: default clone flow does not pin simplified-dev", async () =>
   for (const source of [readme, claude]) {
     assert.equal(source.includes("git checkout simplified-dev"), false);
     assert.equal(source.includes("select the simplified branch"), false);
+  }
+});
+
+test("demo launcher: builds public setup and playground URLs only", async () => {
+  const demo = await loadDemoLauncher();
+  assert.equal(demo.buildDemoUrl(undefined), "https://app.silmaril.dev/demo/setup-complete");
+  assert.equal(demo.buildDemoUrl("app.silmaril.dev", "playground"), "https://app.silmaril.dev/demo/playground");
+  assert.equal(demo.buildDemoUrl("http://localhost:3001", "setup"), "http://localhost:3001/demo/setup-complete");
+  assert.equal(demo.buildDemoUrl("   "), "https://app.silmaril.dev/demo/setup-complete");
+});
+
+test("demo launcher: option values do not consume another flag", async () => {
+  const demo = await loadDemoLauncher();
+  const originalArgv = process.argv;
+  try {
+    process.argv = ["node", "scripts/open-playground.mjs", "--route", "--json"];
+    assert.equal(demo.optionValue("--route"), undefined);
+
+    process.argv = ["node", "scripts/open-playground.mjs", "--route", "playground", "--json"];
+    assert.equal(demo.optionValue("--route"), "playground");
+  } finally {
+    process.argv = originalArgv;
+  }
+});
+
+test("demo launcher: JSON status omits raw API keys", async () => {
+  const demo = await loadDemoLauncher();
+  assert.deepEqual(demo.resolveRuntimeConfig({
+    apiUrl: " https://tenant.example/classify ",
+    silmarilApiKey: "secret-key",
+  }), {
+    configured: true,
+    apiUrl: "https://tenant.example/classify",
+    hasApiKey: true,
+  });
+  assert.equal(JSON.stringify(demo.resolveRuntimeConfig({
+    apiUrl: "https://tenant.example/classify",
+    silmarilApiKey: "secret-key",
+  })).includes("secret-key"), false);
+});
+
+test("demo launcher: opener ENOENT is handled without an unhandled error", async () => {
+  const demo = await loadDemoLauncher();
+  const originalArgv = process.argv;
+  const originalExitCode = process.exitCode;
+  try {
+    process.argv = ["node", "scripts/open-playground.mjs", "--open"];
+    process.exitCode = undefined;
+
+    await withConsoleCapture(async ({ logs, errors }) => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      let openerCommand;
+
+      await demo.printOrOpen("https://app.silmaril.dev/demo/setup-complete", {
+        configured: false,
+        hasApiKey: false,
+      }, (command) => {
+        openerCommand = command;
+        setImmediate(() => child.emit("error", new Error("missing opener")));
+        return child;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(logs, ["https://app.silmaril.dev/demo/setup-complete"]);
+      assert.deepEqual(errors, [`Could not open browser with ${openerCommand}: missing opener`]);
+      assert.equal(process.exitCode, 1);
+    });
+  } finally {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
   }
 });
 

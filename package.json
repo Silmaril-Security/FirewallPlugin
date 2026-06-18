@@ -9,8 +9,10 @@
     "prepack": "npm run build"
   },
   "files": [
+    ".env.example",
     "dist",
     "openclaw.plugin.json",
+    "scripts/open-playground.mjs",
     "README.md",
     "CLAUDE.md"
   ],

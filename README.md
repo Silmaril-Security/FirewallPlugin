@@ -44,6 +44,7 @@ are not printed to logs or returned in block reasons.
 | `package.json` | Package metadata, dependency list, and OpenClaw extension metadata |
 | `scripts/build.mjs` | Builds `dist/index.js` for CLI plugin installation |
 | `scripts/mock-silmaril-classifier.mjs` | Local classifier stub for manual smoke testing |
+| `scripts/open-playground.mjs` | Opens or prints the public Silmaril Firewall demo URL |
 | `dist/index.js` | Built plugin entrypoint used by OpenClaw's CLI install path |
 
 ## Source Checkout Configuration
@@ -101,6 +102,11 @@ By default the plugin is pass-through only. It does not cache classifier
 results, add prompt/system/developer context, change assistant output, or
 register wrapper tools.
 
+Configuration precedence is intentionally OpenClaw-native: hook execution reads
+`plugins.entries.firewall-plugin.config` from OpenClaw at runtime. The launcher
+can read the same object from `OPENCLAW_FIREWALL_PLUGIN_CONFIG` for JSON status,
+but the runtime does not use environment variables for classifier credentials.
+Do not commit API keys or write them into URLs.
 
 ## Install
 
@@ -184,6 +190,35 @@ Run diagnostics:
 
 ```sh
 openclaw --no-color plugins doctor
+```
+
+## Public Demo
+
+The demo launcher opens the hosted Silmaril Firewall UI at
+`https://app.silmaril.dev/demo/setup-complete`. It does not serve a local UI,
+start a credential proxy, or put the Silmaril API key in the URL, chat, or
+launcher output.
+
+Run it from the repository root:
+
+```sh
+node scripts/open-playground.mjs
+node scripts/open-playground.mjs --open
+node scripts/open-playground.mjs --route playground --json
+```
+
+For preview validation, override the hosted base URL:
+
+```sh
+SILMARIL_DEMO_BASE_URL="http://localhost:3001" node scripts/open-playground.mjs
+```
+
+To show whether local OpenClaw plugin config is complete without printing the
+secret key, pass the plugin config as JSON:
+
+```sh
+OPENCLAW_FIREWALL_PLUGIN_CONFIG='{"apiUrl":"https://.../classify","silmarilApiKey":"..."}' \
+  node scripts/open-playground.mjs --json
 ```
 
 ## Manual Smoke Test

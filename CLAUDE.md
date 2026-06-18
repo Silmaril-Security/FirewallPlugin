@@ -20,6 +20,8 @@ Allowed onboarding changes:
   default Claude Code onboarding path
 - create an npm package tarball with `npm pack` when the user wants a clean
   installable archive
+- open or print the hosted Silmaril Firewall demo URL with
+  `node scripts/open-playground.mjs`
 - add or update the `firewall-plugin` entry in the user's OpenClaw config
 - run OpenClaw diagnostics, inspect commands, gateway restarts, and manual smoke
   tests
@@ -55,6 +57,8 @@ Runtime behavior:
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes
+- `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
+  demo URL without serving local UI or printing the API key
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
 - no classifier result is cached or consumed later
@@ -234,7 +238,18 @@ for direct source loading or the CLI install path is unavailable.
     tool_result_persist
    ```
 
-11. Run a manual smoke test:
+11. Optional hosted demo walkthrough:
+
+    ```sh
+    node scripts/open-playground.mjs --open
+    ```
+
+    The launcher prints or opens
+    `https://app.silmaril.dev/demo/setup-complete`. It does not put credentials
+    in the URL or output. Use the user's configured `silmarilApiKey` only in
+    the demo page fields during an authorized setup flow.
+
+12. Run a manual smoke test:
 
     ```sh
     openclaw agent --agent main --message "Reply with FIREWALL_PLUGIN_SMOKE_OK."
