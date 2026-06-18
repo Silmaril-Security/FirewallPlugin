@@ -249,3 +249,7 @@ firewall-plugin: installed
 The mock classifier writes captured requests to the path printed on startup.
 Those captures should show the hook label, tool name when available, and the
 classified text length.
+
+## License
+
+This plugin is licensed under Apache-2.0. See `LICENSE` and `NOTICE`.

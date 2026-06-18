@@ -236,7 +236,10 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.equal((packageSource.match(/"devDependencies"\s*:/g) ?? []).length, 1);
 
   const packageJson = JSON.parse(packageSource);
+  assert.equal(packageJson.license, "Apache-2.0");
   assert.ok(packageJson.files.includes(".env.example"));
+  assert.ok(packageJson.files.includes("LICENSE"));
+  assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.4.2");
