@@ -221,6 +221,9 @@ OPENCLAW_FIREWALL_PLUGIN_CONFIG='{"apiUrl":"https://.../classify","silmarilApiKe
   node scripts/open-playground.mjs --json
 ```
 
+The JSON status schema intentionally reports `hasApiUrl` and `hasApiKey`
+booleans instead of echoing the raw `apiUrl` endpoint or API key.
+
 ## Manual Smoke Test
 
 For a local smoke test, start the mock classifier:
