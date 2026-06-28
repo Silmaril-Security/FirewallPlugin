@@ -278,20 +278,23 @@ test("demo launcher: option values do not consume another flag", async () => {
   }
 });
 
-test("demo launcher: JSON status omits raw API keys", async () => {
+test("demo launcher: JSON status omits raw API keys and endpoints", async () => {
   const demo = await loadDemoLauncher();
   assert.deepEqual(demo.resolveRuntimeConfig({
     apiUrl: " https://tenant.example/classify ",
     silmarilApiKey: "secret-key",
   }), {
     configured: true,
-    apiUrl: "https://tenant.example/classify",
+    hasApiUrl: true,
     hasApiKey: true,
   });
-  assert.equal(JSON.stringify(demo.resolveRuntimeConfig({
+  const statusJson = JSON.stringify(demo.resolveRuntimeConfig({
     apiUrl: "https://tenant.example/classify",
     silmarilApiKey: "secret-key",
-  })).includes("secret-key"), false);
+  }));
+  assert.equal(statusJson.includes("secret-key"), false);
+  assert.equal(statusJson.includes("tenant.example"), false);
+  assert.equal(statusJson.includes("/classify"), false);
 });
 
 test("demo launcher: opener ENOENT is handled without an unhandled error", async () => {

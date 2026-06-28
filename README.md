@@ -214,12 +214,15 @@ SILMARIL_DEMO_BASE_URL="http://localhost:3001" node scripts/open-playground.mjs
 ```
 
 To show whether local OpenClaw plugin config is complete without printing the
-secret key, pass the plugin config as JSON:
+secret key or classifier endpoint, pass the plugin config as JSON:
 
 ```sh
 OPENCLAW_FIREWALL_PLUGIN_CONFIG='{"apiUrl":"https://.../classify","silmarilApiKey":"..."}' \
   node scripts/open-playground.mjs --json
 ```
+
+The JSON status schema intentionally reports `hasApiUrl` and `hasApiKey`
+booleans instead of echoing the raw `apiUrl` endpoint or API key.
 
 ## Manual Smoke Test
 
