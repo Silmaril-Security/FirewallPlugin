@@ -104,9 +104,8 @@ register wrapper tools.
 
 Configuration precedence is intentionally OpenClaw-native: hook execution reads
 `plugins.entries.firewall-plugin.config` from OpenClaw at runtime. The launcher
-can read the same object from `OPENCLAW_FIREWALL_PLUGIN_CONFIG` for JSON status,
-but the runtime does not use environment variables for classifier credentials.
-Do not commit API keys or write them into URLs.
+prints only the public demo URL and does not read or echo classifier
+configuration values. Do not commit API keys or write them into URLs.
 
 ## Install
 
@@ -213,16 +212,14 @@ For preview validation, override the hosted base URL:
 SILMARIL_DEMO_BASE_URL="http://localhost:3001" node scripts/open-playground.mjs
 ```
 
-To show whether local OpenClaw plugin config is complete without printing the
-secret key or classifier endpoint, pass the plugin config as JSON:
+For machine-readable automation output, pass `--json`:
 
 ```sh
-OPENCLAW_FIREWALL_PLUGIN_CONFIG='{"apiUrl":"https://.../classify","silmarilApiKey":"..."}' \
-  node scripts/open-playground.mjs --json
+node scripts/open-playground.mjs --json
 ```
 
-The JSON status schema intentionally reports `hasApiUrl` and `hasApiKey`
-booleans instead of echoing the raw `apiUrl` endpoint or API key.
+The JSON output intentionally contains only the public demo URL and no OpenClaw
+configuration status, classifier endpoint, or API key fields.
 
 ## Manual Smoke Test
 

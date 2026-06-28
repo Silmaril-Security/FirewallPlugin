@@ -58,7 +58,7 @@ Runtime behavior:
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
-  demo URL without serving local UI or printing the API key
+  demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
 - no classifier result is cached or consumed later
@@ -246,8 +246,9 @@ for direct source loading or the CLI install path is unavailable.
 
     The launcher prints or opens
     `https://app.silmaril.dev/demo/setup-complete`. It does not put credentials
-    in the URL or output. Use the user's configured `silmarilApiKey` only in
-    the demo page fields during an authorized setup flow.
+    or classifier endpoints in the URL or output. Use the user's configured
+    `silmarilApiKey` only in the demo page fields during an authorized setup
+    flow.
 
 12. Run a manual smoke test:
 

@@ -40,20 +40,6 @@ export function buildDemoUrl(baseUrl, route = "setup") {
   return new URL(ROUTES[normalizeRoute(route)], normalizeBaseUrl(baseUrl)).href;
 }
 
-export function resolveRuntimeConfig(config = {}) {
-  const apiUrl = readString(config.apiUrl);
-  const apiKey = readString(config.silmarilApiKey) ?? readString(config.apiKey);
-  return {
-    configured: Boolean(apiUrl && apiKey),
-    hasApiUrl: Boolean(apiUrl),
-    hasApiKey: Boolean(apiKey),
-  };
-}
-
-function readString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
 function openerCommand(url) {
   if (process.platform === "darwin") {
     return { command: "open", args: [url], options: { detached: true, stdio: "ignore" } };
@@ -70,14 +56,9 @@ function openerCommand(url) {
   return { command: "xdg-open", args: [url], options: { detached: true, stdio: "ignore" } };
 }
 
-export async function printOrOpen(url, config, spawnImpl = spawn) {
+export async function printOrOpen(url, spawnImpl = spawn) {
   if (hasFlag("--json")) {
-    console.log(JSON.stringify({
-      url,
-      configured: config.configured,
-      hasApiUrl: config.hasApiUrl,
-      hasApiKey: config.hasApiKey,
-    }));
+    console.log(JSON.stringify({ url }));
   } else {
     console.log(url);
   }
@@ -103,21 +84,8 @@ function printHelp() {
   console.log("");
   console.log("Prints the public Silmaril Firewall demo URL.");
   console.log("Override the hosted base URL with SILMARIL_DEMO_BASE_URL for preview validation.");
-  console.log("Pass OpenClaw plugin config as JSON through OPENCLAW_FIREWALL_PLUGIN_CONFIG for JSON status.");
+  console.log("Pass --json to print a machine-readable URL without OpenClaw configuration values.");
   console.log(`Platform: ${os.platform()}`);
-}
-
-function readConfigFromEnv() {
-  const rawConfig = process.env.OPENCLAW_FIREWALL_PLUGIN_CONFIG;
-  if (!rawConfig) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(rawConfig);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 async function main() {
@@ -128,8 +96,7 @@ async function main() {
 
   const demoBaseUrl = process.env.SILMARIL_DEMO_BASE_URL ?? DEFAULT_DEMO_BASE_URL;
   const route = routeFromCli();
-  const config = resolveRuntimeConfig(readConfigFromEnv());
-  await printOrOpen(buildDemoUrl(demoBaseUrl, route), config);
+  await printOrOpen(buildDemoUrl(demoBaseUrl, route));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
