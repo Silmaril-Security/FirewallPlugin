@@ -45,7 +45,7 @@ export function resolveRuntimeConfig(config = {}) {
   const apiKey = readString(config.silmarilApiKey) ?? readString(config.apiKey);
   return {
     configured: Boolean(apiUrl && apiKey),
-    apiUrl,
+    hasApiUrl: Boolean(apiUrl),
     hasApiKey: Boolean(apiKey),
   };
 }
@@ -75,7 +75,7 @@ export async function printOrOpen(url, config, spawnImpl = spawn) {
     console.log(JSON.stringify({
       url,
       configured: config.configured,
-      apiUrl: config.apiUrl,
+      hasApiUrl: config.hasApiUrl,
       hasApiKey: config.hasApiKey,
     }));
   } else {
