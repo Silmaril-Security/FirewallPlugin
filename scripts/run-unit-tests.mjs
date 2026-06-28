@@ -278,23 +278,21 @@ test("demo launcher: option values do not consume another flag", async () => {
   }
 });
 
-test("demo launcher: JSON status omits raw API keys and endpoints", async () => {
+test("demo launcher: JSON status contains only the public demo URL", async () => {
   const demo = await loadDemoLauncher();
-  assert.deepEqual(demo.resolveRuntimeConfig({
-    apiUrl: " https://tenant.example/classify ",
-    silmarilApiKey: "secret-key",
-  }), {
-    configured: true,
-    hasApiUrl: true,
-    hasApiKey: true,
-  });
-  const statusJson = JSON.stringify(demo.resolveRuntimeConfig({
-    apiUrl: "https://tenant.example/classify",
-    silmarilApiKey: "secret-key",
-  }));
-  assert.equal(statusJson.includes("secret-key"), false);
-  assert.equal(statusJson.includes("tenant.example"), false);
-  assert.equal(statusJson.includes("/classify"), false);
+  const originalArgv = process.argv;
+  try {
+    process.argv = ["node", "scripts/open-playground.mjs", "--json"];
+    await withConsoleCapture(async ({ logs }) => {
+      await demo.printOrOpen("https://app.silmaril.dev/demo/setup-complete");
+      assert.deepEqual(JSON.parse(logs[0]), {
+        url: "https://app.silmaril.dev/demo/setup-complete",
+      });
+      assert.deepEqual(Object.keys(JSON.parse(logs[0])), ["url"]);
+    });
+  } finally {
+    process.argv = originalArgv;
+  }
 });
 
 test("demo launcher: opener ENOENT is handled without an unhandled error", async () => {
@@ -310,10 +308,7 @@ test("demo launcher: opener ENOENT is handled without an unhandled error", async
       child.unref = () => {};
       let openerCommand;
 
-      await demo.printOrOpen("https://app.silmaril.dev/demo/setup-complete", {
-        configured: false,
-        hasApiKey: false,
-      }, (command) => {
+      await demo.printOrOpen("https://app.silmaril.dev/demo/setup-complete", (command) => {
         openerCommand = command;
         setImmediate(() => child.emit("error", new Error("missing opener")));
         return child;
