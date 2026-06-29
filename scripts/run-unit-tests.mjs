@@ -44,7 +44,8 @@ await build({
             export const HookLabel = {
               USER_INPUT: "USER_INPUT",
               TOOL_CALL: "TOOL_CALL",
-              TOOL_RESPONSE: "TOOL_RESPONSE"
+              TOOL_RESPONSE: "TOOL_RESPONSE",
+              LLM_OUTPUT: "LLM_OUTPUT"
             };
             export class Firewall {
               constructor(options) {
@@ -416,6 +417,12 @@ test("tool result extraction handles strings, objects, arrays, and empty content
   assert.equal(t.extractToolResultText(undefined), "");
 });
 
+test("message sending extraction handles strings and empty content", () => {
+  assert.equal(t.extractMessageSendingText({ content: "assistant text" }), "assistant text");
+  assert.equal(t.extractMessageSendingText({ content: { text: "assistant text" } }), "");
+  assert.equal(t.extractMessageSendingText(undefined), "");
+});
+
 test("safeStringify handles circular references, BigInt, undefined, and throwing toJSON", () => {
   const circular = { a: 1, big: 2n };
   circular.self = circular;
@@ -424,12 +431,13 @@ test("safeStringify handles circular references, BigInt, undefined, and throwing
   assert.equal(t.safeStringify({ toJSON() { throw new Error("boom"); } }), "[object Object]");
 });
 
-test("plugin: registers only startup and classifier hooks", () => {
+test("plugin: registers startup and classifier hooks", () => {
   const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u", timeoutMs: 777 } });
   assert.deepEqual([...env.hooks.keys()].sort(), [
     "before_prompt_build",
     "before_tool_call",
     "gateway_start",
+    "message_sending",
     "tool_result_persist",
   ]);
   for (const entry of env.hooks.values()) {
@@ -508,7 +516,7 @@ test("plugin: before_tool_call classifies safe-stringified params and passes thr
   });
 });
 
-test("plugin: optional enforcement blocks only before_tool_call when not shadowing", async () => {
+test("plugin: optional enforcement blocks enforceable outputs when not shadowing", async () => {
   const env = registerPlugin({
     config: {
       apiKey: "k",
@@ -525,16 +533,28 @@ test("plugin: optional enforcement blocks only before_tool_call when not shadowi
   });
 
   await withConsoleCapture(async ({ logs }) => {
-    const result = await hook(env, "before_tool_call")({
+    const toolCallResult = await hook(env, "before_tool_call")({
       toolName: "exec",
       params: { command: "rm -rf /tmp/example" },
     }, {});
-    assert.deepEqual(result, {
+    assert.deepEqual(toolCallResult, {
       block: true,
-      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
+      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; prediction=MALICIOUS; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
     });
+    const messageResult = await hook(env, "message_sending")({
+      to: "user",
+      content: "raw malicious final assistant output",
+      messageId: "msg-1",
+    }, {});
+    assert.equal(messageResult.cancel, true);
+    assert.equal(messageResult.content.includes("raw malicious final assistant output"), false);
+    assert.equal(messageResult.content.includes('"openClawHookEvent": "message_sending"'), true);
+    assert.equal(messageResult.content.includes('"hook": "LLM_OUTPUT"'), true);
+    assert.equal(messageResult.content.includes('"messageId": "msg-1"'), true);
     assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call blocked:")));
+    assert.ok(logs.some((line) => line.includes("[firewall] message_sending blocked:")));
     assert.equal(logs.some((line) => line.includes("rm -rf")), false);
+    assert.equal(logs.some((line) => line.includes("raw malicious final assistant output")), false);
   });
 });
 
@@ -556,7 +576,9 @@ test("plugin: shadowMode prevents blocking even when blockMalicious is true", as
 
   await withSilencedConsole(async () => {
     const result = await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "false" } }, {});
+    const messageResult = await hook(env, "message_sending")({ to: "user", content: "assistant output" }, {});
     assert.equal(result, undefined);
+    assert.equal(messageResult, undefined);
   });
 });
 
@@ -625,7 +647,7 @@ test("plugin: before_tool_call uses config captured before classifier await", as
     });
     assert.deepEqual(await call, {
       block: true,
-      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
+      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; prediction=MALICIOUS; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
     });
   });
 });
@@ -637,6 +659,7 @@ test("plugin: stable runtime config reuses one Firewall client", async () => {
     await hook(env, "before_prompt_build")({ prompt: "first" }, {});
     await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
     hook(env, "tool_result_persist")({ message: { content: "tool output" } }, {});
+    await hook(env, "message_sending")({ to: "user", content: "assistant output" }, {});
     await sleep(0);
   });
 
@@ -657,7 +680,7 @@ test("plugin: runtime config changes create a new Firewall client", async () => 
     config.apiUrl = "u2";
     await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
     config.blockMalicious = true;
-    await hook(env, "before_prompt_build")({ prompt: "third" }, {});
+    await hook(env, "message_sending")({ to: "user", content: "third" }, {});
   });
 
   assert.equal(globalThis.__silmarilFirewallInstances.length, 3);
@@ -717,12 +740,15 @@ test("plugin: classifier errors are logged and fail open", async () => {
     const promptResult = await hook(env, "before_prompt_build")({ prompt: "risk", runId: "run-error" }, {});
     const toolResult = await hook(env, "before_tool_call")({ params: { a: 1 } }, {});
     hook(env, "tool_result_persist")({ message: { content: "tool result" } }, {});
+    const messageResult = await hook(env, "message_sending")({ to: "user", content: "assistant result" }, {});
     await sleep(0);
     assert.equal(promptResult, undefined);
     assert.equal(toolResult, undefined);
+    assert.equal(messageResult, undefined);
     assert.ok(errors.some((line) => line.includes("before_prompt_build error:")));
     assert.ok(errors.some((line) => line.includes("before_tool_call error:")));
     assert.ok(errors.some((line) => line.includes("tool_result_persist error:")));
+    assert.ok(errors.some((line) => line.includes("message_sending error:")));
     assert.equal(errors.some((line) => line.includes("raw classified prompt")), false);
   });
 });

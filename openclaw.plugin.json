@@ -1,7 +1,7 @@
 {
   "id": "firewall-plugin",
   "name": "Firewall Plugin",
-  "description": "Passes OpenClaw prompt, tool-call, and persisted tool-result hook payloads to Silmaril for classification.",
+  "description": "Passes OpenClaw prompt, tool-call, persisted tool-result, and outbound assistant-message hook payloads to Silmaril for classification.",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]
@@ -35,6 +35,6 @@
     "apiUrl": { "label": "API URL" },
     "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
     "shadowMode": { "label": "Shadow mode", "advanced": true },
-    "blockMalicious": { "label": "Block malicious pre-tool calls", "advanced": true }
+    "blockMalicious": { "label": "Block malicious content at supported boundaries", "advanced": true }
   }
 }

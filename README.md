@@ -2,12 +2,14 @@
 
 Silmaril classification for OpenClaw plugin hooks.
 
-The plugin observes OpenClaw prompt, tool-call, and tool-result hook payloads,
-sends them to a Silmaril classify endpoint, and logs the returned prediction and
-score. Runtime behavior is fail-open: classifier errors are logged, then
-OpenClaw execution continues. Optional enforcement is available only for the
-pre-execution `before_tool_call` hook. It requires both `shadowMode: false` and
-`blockMalicious: true`; all other hooks remain pass-through.
+The plugin observes OpenClaw prompt, tool-call, tool-result, and outbound
+assistant-message hook payloads, sends them to a Silmaril classify endpoint, and
+logs the returned prediction and score. Runtime behavior is fail-open:
+classifier errors are logged, then OpenClaw execution continues. Optional
+enforcement applies at every boundary this external plugin can control:
+`before_tool_call` blocks pending tool calls, and `message_sending` cancels
+malicious outbound assistant messages. It requires both `shadowMode: false` and
+`blockMalicious: true`.
 
 The plugin targets OpenClaw plugin API `2026.5.18` and newer. Its manifest
 declares startup activation for hook capability loading, and the runtime entry
@@ -20,20 +22,22 @@ registers typed Gateway hooks with `api.on(...)`.
 | `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
 | `before_prompt_build` | `USER_INPUT` | User prompt text |
 | `before_tool_call` | `TOOL_CALL` | JSON-serialized tool parameters; can return `{ "block": true, "blockReason": "..." }` when enforcement is explicitly enabled |
-| `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context |
+| `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context; observe-only because external OpenClaw plugins cannot replace tool results |
+| `message_sending` | `LLM_OUTPUT` | Final outbound assistant message text; can return `{ "cancel": true, "content": "..." }` with a safe replacement summary when enforcement is explicitly enabled |
 
 Hook registration is unconditional, so OpenClaw can discover and invoke the
 Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
-`before_prompt_build` and `before_tool_call` await the Silmaril SDK directly
-with a plugin-owned timeout. `tool_result_persist` is a synchronous OpenClaw
-hook, so the plugin starts a fail-open classification request and returns
-immediately. The result is logged when the classifier call completes.
-Image-only and other empty tool results are skipped. Logs include hook label,
-event type, tool/correlation identifiers when available, prediction, score,
-threshold, and primary outcome. Raw prompts, tool parameters, and tool results
-are not printed to logs or returned in block reasons.
+`before_prompt_build`, `before_tool_call`, and `message_sending` await the
+Silmaril SDK directly with a plugin-owned timeout. `tool_result_persist` is a
+synchronous OpenClaw hook with no return channel, so the plugin starts a
+fail-open classification request and returns immediately. The result is logged
+when the classifier call completes. Image-only and other empty tool results are
+skipped. Logs include hook label, event type, tool/correlation identifiers when
+available, prediction, score, threshold, and primary outcome. Raw prompts, tool
+parameters, tool results, and assistant messages are not printed to logs or
+returned in block reasons or replacement content.
 
 ## Files
 
@@ -90,17 +94,19 @@ legacy fallback and may otherwise be used as a plugin or OpenClaw identity key.
 request.
 
 `shadowMode` defaults to `true` and preserves pass-through behavior. To enable
-pre-tool blocking, set both `shadowMode: false` and `blockMalicious: true`.
-Blocking uses OpenClaw's documented `before_tool_call` decision shape and never
-retroactively blocks persisted tool results.
+blocking at every supported boundary, set both `shadowMode: false` and
+`blockMalicious: true`. Blocking uses OpenClaw's documented `before_tool_call`
+decision shape for tool calls and `message_sending` cancellation shape for final
+assistant messages. The external plugin cannot retroactively block or replace
+persisted tool results; the bundled OpenClaw Silmaril Firewall extension uses
+OpenClaw's trusted tool-result middleware for that boundary.
 
 Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
 OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
 that setting blocks the hook registration.
 
 By default the plugin is pass-through only. It does not cache classifier
-results, add prompt/system/developer context, change assistant output, or
-register wrapper tools.
+results, add prompt/system/developer context, or register wrapper tools.
 
 Configuration precedence is intentionally OpenClaw-native: hook execution reads
 `plugins.entries.firewall-plugin.config` from OpenClaw at runtime. The launcher
@@ -183,6 +189,7 @@ gateway_start
 before_prompt_build
 before_tool_call
 tool_result_persist
+message_sending
 ```
 
 Run diagnostics:
@@ -244,6 +251,7 @@ firewall-plugin: installed
 [firewall] before_prompt_build result:
 [firewall] before_tool_call result:
 [firewall] tool_result_persist result:
+[firewall] message_sending result:
 ```
 
 The mock classifier writes captured requests to the path printed on startup.
