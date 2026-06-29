@@ -314,7 +314,7 @@ function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | 
   if (readBoolean(resultRecord.blocked) === true) {
     return true;
   }
-  return prediction === "malicious" || (primaryOutcome !== undefined && primaryOutcome !== "benign");
+  return prediction === "malicious";
 }
 
 const shouldBlockToolCall = shouldBlockClassification;

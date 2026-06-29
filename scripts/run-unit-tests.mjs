@@ -623,6 +623,9 @@ test("decision: benign predictions pass and thresholds block conflicts", () => {
     threshold: 0.5,
     primaryOutcome: "control_abuse",
   }), true);
+  assert.equal(t.shouldBlockToolCall(config, {
+    primaryOutcome: "control_abuse",
+  }), false);
   assert.equal(t.shouldBlockToolCall({ ...config, shadowMode: true }, {
     prediction: "MALICIOUS",
     score: 0.99,

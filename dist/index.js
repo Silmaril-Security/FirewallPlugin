@@ -222,7 +222,7 @@ function shouldBlockClassification(config, result) {
   if (readBoolean(resultRecord.blocked) === true) {
     return true;
   }
-  return prediction === "malicious" || primaryOutcome !== void 0 && primaryOutcome !== "benign";
+  return prediction === "malicious";
 }
 const shouldBlockToolCall = shouldBlockClassification;
 function buildBlockResult(result, meta) {
