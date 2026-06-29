@@ -417,9 +417,10 @@ test("tool result extraction handles strings, objects, arrays, and empty content
   assert.equal(t.extractToolResultText(undefined), "");
 });
 
-test("message sending extraction handles strings and empty content", () => {
+test("message sending extraction handles strings, objects, arrays, and empty content", () => {
   assert.equal(t.extractMessageSendingText({ content: "assistant text" }), "assistant text");
-  assert.equal(t.extractMessageSendingText({ content: { text: "assistant text" } }), "");
+  assert.equal(t.extractMessageSendingText({ content: { text: "assistant text" } }), "assistant text");
+  assert.equal(t.extractMessageSendingText({ content: ["a", { text: "b" }, { type: "image" }] }), "a\nb\n");
   assert.equal(t.extractMessageSendingText(undefined), "");
 });
 
@@ -551,6 +552,8 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
     assert.equal(messageResult.content.includes('"openClawHookEvent": "message_sending"'), true);
     assert.equal(messageResult.content.includes('"hook": "LLM_OUTPUT"'), true);
     assert.equal(messageResult.content.includes('"messageId": "msg-1"'), true);
+    assert.equal(messageResult.content.includes('"score"'), false);
+    assert.equal(messageResult.content.includes('"threshold"'), false);
     assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call blocked:")));
     assert.ok(logs.some((line) => line.includes("[firewall] message_sending blocked:")));
     assert.equal(logs.some((line) => line.includes("rm -rf")), false);
@@ -582,7 +585,7 @@ test("plugin: shadowMode prevents blocking even when blockMalicious is true", as
   });
 });
 
-test("decision: benign outcomes do not block even above threshold", () => {
+test("decision: benign predictions pass and thresholds block conflicts", () => {
   const config = {
     apiKey: "k",
     apiUrl: "u",
@@ -602,6 +605,12 @@ test("decision: benign outcomes do not block even above threshold", () => {
     threshold: 0.5,
     primaryOutcome: "control_abuse",
   }), false);
+  assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "benign",
+  }), true);
   assert.equal(t.shouldBlockToolCall(config, {
     prediction: "MALICIOUS",
     score: 0.1,

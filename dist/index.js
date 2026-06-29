@@ -210,9 +210,6 @@ function shouldBlockClassification(config, result) {
   }
   const primaryOutcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome.toLowerCase() : void 0;
   const prediction = typeof result.prediction === "string" ? result.prediction.toLowerCase() : void 0;
-  if (primaryOutcome === "benign") {
-    return false;
-  }
   if (prediction === "benign") {
     return false;
   }
@@ -260,8 +257,6 @@ function buildBlockedReplacement(result, meta, reason) {
       reason,
       classification: {
         prediction: result.prediction,
-        score: result.score,
-        threshold: result.threshold,
         primaryOutcome: result.primaryOutcome
       }
     }
@@ -382,8 +377,7 @@ function safeStringify(value) {
     return String(value ?? "");
   }
 }
-function extractToolResultText(event) {
-  const content = event?.message?.content;
+function extractContentText(content) {
   if (typeof content === "string") {
     return content;
   }
@@ -404,8 +398,11 @@ function extractToolResultText(event) {
     return "";
   }).join("\n");
 }
+function extractToolResultText(event) {
+  return extractContentText(event?.message?.content);
+}
 function extractMessageSendingText(event) {
-  return typeof event?.content === "string" ? event.content : "";
+  return extractContentText(event?.content);
 }
 const __testInternals = {
   resolveRuntimeConfig,

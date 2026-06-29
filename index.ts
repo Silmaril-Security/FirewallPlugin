@@ -296,9 +296,6 @@ function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | 
   const prediction = typeof result.prediction === "string"
     ? result.prediction.toLowerCase()
     : undefined;
-  if (primaryOutcome === "benign") {
-    return false;
-  }
   if (prediction === "benign") {
     return false;
   }
@@ -356,8 +353,6 @@ function buildBlockedReplacement(result: BlockResult, meta: HookLogMeta, reason:
       reason,
       classification: {
         prediction: result.prediction,
-        score: result.score,
-        threshold: result.threshold,
         primaryOutcome: result.primaryOutcome,
       },
     },
@@ -490,8 +485,7 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function extractToolResultText(event: { message?: { content?: unknown } } | undefined): string {
-  const content = event?.message?.content;
+function extractContentText(content: unknown): string {
   if (typeof content === "string") {
     return content;
   }
@@ -515,8 +509,12 @@ function extractToolResultText(event: { message?: { content?: unknown } } | unde
     .join("\n");
 }
 
+function extractToolResultText(event: { message?: { content?: unknown } } | undefined): string {
+  return extractContentText(event?.message?.content);
+}
+
 function extractMessageSendingText(event: { content?: unknown } | undefined): string {
-  return typeof event?.content === "string" ? event.content : "";
+  return extractContentText(event?.content);
 }
 
 export const __testInternals = {
