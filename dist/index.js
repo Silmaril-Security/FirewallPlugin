@@ -6,7 +6,7 @@ const MAX_CLASSIFY_TIMEOUT_MS = 1e4;
 var index_default = definePluginEntry({
   id: "firewall-plugin",
   name: "Firewall Plugin",
-  description: "Passes OpenClaw hook payloads to Silmaril for classification",
+  description: "Passes OpenClaw hook payloads to Silmaril for classification and supported enforcement",
   register(api) {
     const registrationTimeoutMs = readIntegerInRange(
       readRecord(api.pluginConfig)?.timeoutMs,
@@ -71,7 +71,7 @@ var index_default = definePluginEntry({
       try {
         const runtimeConfig = runtime.config;
         const result = await classifyHookPayload(runtime.state.firewall, safeStringify(event?.params ?? {}), meta);
-        if (shouldBlockToolCall(runtimeConfig, result)) {
+        if (shouldBlockClassification(runtimeConfig, result)) {
           const block = buildBlockResult(result, meta);
           logBlocked(meta, result);
           return block;
@@ -98,6 +98,31 @@ var index_default = definePluginEntry({
       } catch (err) {
         logError(meta, err);
       }
+    }, hookOptions);
+    api.on("message_sending", async (event, ctx) => {
+      const meta = buildHookLogMeta("message_sending", HookLabel.LLM_OUTPUT, event, ctx);
+      const runtime = getRuntime();
+      if (!runtime) {
+        logSkipped(meta, "missing_config");
+        return;
+      }
+      try {
+        const text = extractMessageSendingText(event);
+        if (!text.trim()) {
+          logSkipped(meta, "empty_payload");
+          return;
+        }
+        const runtimeConfig = runtime.config;
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        if (shouldBlockClassification(runtimeConfig, result)) {
+          const block = buildMessageSendingBlock(result, meta);
+          logBlocked(meta, result);
+          return block;
+        }
+      } catch (err) {
+        logError(meta, err);
+      }
+      return void 0;
     }, hookOptions);
   }
 });
@@ -179,22 +204,32 @@ async function classifyHookPayload(firewall, text, meta) {
   }));
   return result;
 }
-function shouldBlockToolCall(config, result) {
+function shouldBlockClassification(config, result) {
   if (config.shadowMode || !config.blockMalicious || !result) {
     return false;
   }
-  if (result.primaryOutcome === "benign") {
+  const primaryOutcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome.toLowerCase() : void 0;
+  const prediction = typeof result.prediction === "string" ? result.prediction.toLowerCase() : void 0;
+  if (prediction === "benign") {
     return false;
   }
-  if (result.prediction === "BENIGN") {
-    return false;
+  const score = typeof result.score === "number" && Number.isFinite(result.score) ? result.score : void 0;
+  const threshold = typeof result.threshold === "number" && Number.isFinite(result.threshold) ? result.threshold : void 0;
+  if (score !== void 0 && threshold !== void 0) {
+    return score >= threshold;
   }
-  return result.score >= result.threshold;
+  const resultRecord = result;
+  if (readBoolean(resultRecord.blocked) === true) {
+    return true;
+  }
+  return prediction === "malicious";
 }
+const shouldBlockToolCall = shouldBlockClassification;
 function buildBlockResult(result, meta) {
   const parts = [
     "Silmaril Firewall blocked this tool call",
     `hook=${meta.hook}`,
+    result.prediction ? `prediction=${result.prediction}` : void 0,
     result.primaryOutcome ? `primaryOutcome=${result.primaryOutcome}` : void 0,
     `score=${result.score}`,
     `threshold=${result.threshold}`
@@ -203,6 +238,29 @@ function buildBlockResult(result, meta) {
     block: true,
     blockReason: parts.join("; ")
   };
+}
+function buildMessageSendingBlock(result, meta) {
+  return {
+    cancel: true,
+    content: buildBlockedReplacement(result, meta, "malicious assistant output withheld before delivery")
+  };
+}
+function buildBlockedReplacement(result, meta, reason) {
+  return JSON.stringify({
+    silmarilFirewall: {
+      blocked: true,
+      hook: meta.hook,
+      openClawHookEvent: meta.hookName,
+      toolName: meta.toolName,
+      toolCallId: meta.toolCallId,
+      messageId: meta.messageId,
+      reason,
+      classification: {
+        prediction: result.prediction,
+        primaryOutcome: result.primaryOutcome
+      }
+    }
+  }, null, 2);
 }
 function buildHookLogMeta(hookName, hook, event, ctx) {
   const eventRecord = readRecord(event);
@@ -319,8 +377,7 @@ function safeStringify(value) {
     return String(value ?? "");
   }
 }
-function extractToolResultText(event) {
-  const content = event?.message?.content;
+function extractContentText(content) {
   if (typeof content === "string") {
     return content;
   }
@@ -341,6 +398,12 @@ function extractToolResultText(event) {
     return "";
   }).join("\n");
 }
+function extractToolResultText(event) {
+  return extractContentText(event?.message?.content);
+}
+function extractMessageSendingText(event) {
+  return extractContentText(event?.content);
+}
 const __testInternals = {
   resolveRuntimeConfig,
   readRecord,
@@ -348,8 +411,11 @@ const __testInternals = {
   readIntegerInRange,
   readBoolean,
   classifyHookPayload,
+  shouldBlockClassification,
   shouldBlockToolCall,
   buildBlockResult,
+  buildMessageSendingBlock,
+  buildBlockedReplacement,
   buildHookLogMeta,
   readTraceId,
   logFields,
@@ -359,7 +425,8 @@ const __testInternals = {
   safeErrorFields,
   safeErrorMessage,
   safeStringify,
-  extractToolResultText
+  extractToolResultText,
+  extractMessageSendingText
 };
 export {
   __testInternals,

@@ -56,16 +56,19 @@ Runtime behavior:
   `shadowMode=false` and `blockMalicious=true`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
-  completes
+  completes; this external hook is observe-only and cannot replace tool results
+- `message_sending` sends final outbound assistant message text as `LLM_OUTPUT`
+- `message_sending` can return `{ cancel: true, content }` with safe replacement
+  metadata only when `shadowMode=false` and `blockMalicious=true`
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
 - no classifier result is cached or consumed later
 - no warning, stub, prompt, system, or developer context is added
-- assistant output is not changed
-- no wrapper tools, exporters, queues, or post-execution enforcement behavior
-  are registered
+- final assistant output can be canceled by the host when explicit blocking is
+  enabled
+- no wrapper tools, exporters, or queues are registered
 - classifier errors fail open
 - raw prompt, tool input, and tool output text is not logged or returned in
   block reasons
@@ -78,8 +81,8 @@ Configuration fields:
 - `apiUrl`: full Silmaril classify endpoint URL, ending in `/classify`
 - `timeoutMs`: optional classifier timeout in milliseconds; default `2500`
 - `shadowMode`: optional pass-through mode; default `true`
-- `blockMalicious`: optional malicious `before_tool_call` blocking; default
-  `false`; only effective when `shadowMode=false`
+- `blockMalicious`: optional malicious blocking at every supported host
+  enforcement boundary; default `false`; only effective when `shadowMode=false`
 
 Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
 OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
@@ -236,6 +239,7 @@ for direct source loading or the CLI install path is unavailable.
     before_prompt_build
     before_tool_call
     tool_result_persist
+    message_sending
    ```
 
 11. Optional hosted demo walkthrough:
@@ -265,6 +269,7 @@ for direct source loading or the CLI install path is unavailable.
     [firewall] before_prompt_build result:
     [firewall] before_tool_call result:
     [firewall] tool_result_persist result:
+    [firewall] message_sending result:
     ```
 
 ## Failure Handling

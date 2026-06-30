@@ -42,10 +42,15 @@ type BeforeToolCallBlock = {
   blockReason: string;
 };
 
+type MessageSendingBlock = {
+  cancel: true;
+  content: string;
+};
+
 export default definePluginEntry({
   id: "firewall-plugin",
   name: "Firewall Plugin",
-  description: "Passes OpenClaw hook payloads to Silmaril for classification",
+  description: "Passes OpenClaw hook payloads to Silmaril for classification and supported enforcement",
   register(api) {
     const registrationTimeoutMs = readIntegerInRange(
       readRecord(api.pluginConfig)?.timeoutMs,
@@ -119,7 +124,7 @@ export default definePluginEntry({
       try {
         const runtimeConfig = runtime.config;
         const result = await classifyHookPayload(runtime.state.firewall, safeStringify(event?.params ?? {}), meta);
-        if (shouldBlockToolCall(runtimeConfig, result)) {
+        if (shouldBlockClassification(runtimeConfig, result)) {
           const block = buildBlockResult(result, meta);
           logBlocked(meta, result);
           return block;
@@ -150,6 +155,34 @@ export default definePluginEntry({
       } catch (err) {
         logError(meta, err);
       }
+    }, hookOptions);
+
+    api.on("message_sending", async (event, ctx) => {
+      const meta = buildHookLogMeta("message_sending", HookLabel.LLM_OUTPUT, event, ctx);
+      const runtime = getRuntime();
+      if (!runtime) {
+        logSkipped(meta, "missing_config");
+        return;
+      }
+
+      try {
+        const text = extractMessageSendingText(event);
+        if (!text.trim()) {
+          logSkipped(meta, "empty_payload");
+          return;
+        }
+
+        const runtimeConfig = runtime.config;
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        if (shouldBlockClassification(runtimeConfig, result)) {
+          const block = buildMessageSendingBlock(result, meta);
+          logBlocked(meta, result);
+          return block;
+        }
+      } catch (err) {
+        logError(meta, err);
+      }
+      return undefined;
     }, hookOptions);
   },
 });
@@ -253,23 +286,44 @@ async function classifyHookPayload(
   return result;
 }
 
-function shouldBlockToolCall(config: RuntimeConfig, result: BlockResult | undefined): result is BlockResult {
+function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | undefined): result is BlockResult {
   if (config.shadowMode || !config.blockMalicious || !result) {
     return false;
   }
-  if (result.primaryOutcome === "benign") {
+  const primaryOutcome = typeof result.primaryOutcome === "string"
+    ? result.primaryOutcome.toLowerCase()
+    : undefined;
+  const prediction = typeof result.prediction === "string"
+    ? result.prediction.toLowerCase()
+    : undefined;
+  if (prediction === "benign") {
     return false;
   }
-  if (result.prediction === "BENIGN") {
-    return false;
+
+  const score = typeof result.score === "number" && Number.isFinite(result.score)
+    ? result.score
+    : undefined;
+  const threshold = typeof result.threshold === "number" && Number.isFinite(result.threshold)
+    ? result.threshold
+    : undefined;
+  if (score !== undefined && threshold !== undefined) {
+    return score >= threshold;
   }
-  return result.score >= result.threshold;
+
+  const resultRecord = result as unknown as Record<string, unknown>;
+  if (readBoolean(resultRecord.blocked) === true) {
+    return true;
+  }
+  return prediction === "malicious";
 }
+
+const shouldBlockToolCall = shouldBlockClassification;
 
 function buildBlockResult(result: BlockResult, meta: HookLogMeta): BeforeToolCallBlock {
   const parts = [
     "Silmaril Firewall blocked this tool call",
     `hook=${meta.hook}`,
+    result.prediction ? `prediction=${result.prediction}` : undefined,
     result.primaryOutcome ? `primaryOutcome=${result.primaryOutcome}` : undefined,
     `score=${result.score}`,
     `threshold=${result.threshold}`,
@@ -278,6 +332,31 @@ function buildBlockResult(result: BlockResult, meta: HookLogMeta): BeforeToolCal
     block: true,
     blockReason: parts.join("; "),
   };
+}
+
+function buildMessageSendingBlock(result: BlockResult, meta: HookLogMeta): MessageSendingBlock {
+  return {
+    cancel: true,
+    content: buildBlockedReplacement(result, meta, "malicious assistant output withheld before delivery"),
+  };
+}
+
+function buildBlockedReplacement(result: BlockResult, meta: HookLogMeta, reason: string): string {
+  return JSON.stringify({
+    silmarilFirewall: {
+      blocked: true,
+      hook: meta.hook,
+      openClawHookEvent: meta.hookName,
+      toolName: meta.toolName,
+      toolCallId: meta.toolCallId,
+      messageId: meta.messageId,
+      reason,
+      classification: {
+        prediction: result.prediction,
+        primaryOutcome: result.primaryOutcome,
+      },
+    },
+  }, null, 2);
 }
 
 function buildHookLogMeta(hookName: string, hook: HookLabel, event: unknown, ctx: unknown): HookLogMeta {
@@ -406,8 +485,7 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function extractToolResultText(event: { message?: { content?: unknown } } | undefined): string {
-  const content = event?.message?.content;
+function extractContentText(content: unknown): string {
   if (typeof content === "string") {
     return content;
   }
@@ -431,6 +509,14 @@ function extractToolResultText(event: { message?: { content?: unknown } } | unde
     .join("\n");
 }
 
+function extractToolResultText(event: { message?: { content?: unknown } } | undefined): string {
+  return extractContentText(event?.message?.content);
+}
+
+function extractMessageSendingText(event: { content?: unknown } | undefined): string {
+  return extractContentText(event?.content);
+}
+
 export const __testInternals = {
   resolveRuntimeConfig,
   readRecord,
@@ -438,8 +524,11 @@ export const __testInternals = {
   readIntegerInRange,
   readBoolean,
   classifyHookPayload,
+  shouldBlockClassification,
   shouldBlockToolCall,
   buildBlockResult,
+  buildMessageSendingBlock,
+  buildBlockedReplacement,
   buildHookLogMeta,
   readTraceId,
   logFields,
@@ -450,4 +539,5 @@ export const __testInternals = {
   safeErrorMessage,
   safeStringify,
   extractToolResultText,
+  extractMessageSendingText,
 };
