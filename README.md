@@ -273,6 +273,8 @@ firewall-plugin: installed
 [firewall] tool_result_persist result:
 [firewall] message_sending result:
 [firewall] reply_payload_sending result:
+[firewall] message_sent result:
+[firewall] subagent_delivery_target result:
 [firewall] subagent_spawned result:
 [firewall] subagent_ended result:
 ```
