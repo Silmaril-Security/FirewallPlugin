@@ -1,7 +1,7 @@
 {
   "id": "firewall-plugin",
   "name": "Firewall Plugin",
-  "description": "Passes OpenClaw prompt, tool-call, persisted tool-result, and outbound assistant-message hook payloads to Silmaril for classification.",
+  "description": "Passes OpenClaw agent, tool, message, delivery, and subagent lifecycle hook payloads to Silmaril and renders readable blocked-decision feedback.",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]

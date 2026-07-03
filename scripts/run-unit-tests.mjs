@@ -172,6 +172,17 @@ function assertClassifyOptions(options, expected) {
   }
 }
 
+function assertNoRawDecisionText(text, rawNeedle) {
+  assert.equal(text.includes("```json"), false);
+  assert.equal(text.includes("score"), false);
+  assert.equal(text.includes("threshold"), false);
+  assert.equal(text.includes("primaryOutcome"), false);
+  assert.equal(text.includes("outcomeScores"), false);
+  if (rawNeedle) {
+    assert.equal(text.includes(rawNeedle), false);
+  }
+}
+
 test("config: missing or blank apiKey/apiUrl disables runtime config", () => {
   assert.equal(t.resolveRuntimeConfig(undefined), undefined);
   assert.equal(t.resolveRuntimeConfig({}), undefined);
@@ -424,6 +435,27 @@ test("message sending extraction handles strings, objects, arrays, and empty con
   assert.equal(t.extractMessageSendingText(undefined), "");
 });
 
+test("delivery and lifecycle extraction covers native OpenClaw payload shapes", () => {
+  assert.equal(t.extractAfterToolCallText({ result: { text: "tool result text" } }), "tool result text");
+  assert.equal(t.extractAfterToolCallText({ result: { data: "fallback" } }), '{"data":"fallback"}');
+  assert.equal(t.extractPresentationText({
+    title: "Presentation",
+    blocks: [
+      { type: "text", text: "main text" },
+      { type: "context", text: "context text" },
+      { type: "actions", elements: [{ label: "Confirm" }] },
+    ],
+  }), "Presentation\nmain text\ncontext text\nConfirm");
+  assert.equal(t.extractReplyPayloadText({
+    payload: {
+      text: "reply text",
+      presentation: { title: "title", blocks: [{ type: "context", text: "context" }] },
+    },
+  }), "reply text\n\ntitle\ncontext");
+  assert.equal(t.extractMessageSentText({ message: { content: [{ text: "delivered" }] } }), "delivered");
+  assert.equal(t.extractLifecycleText({ child: { id: "child-1", goal: "scan child prompt" } }), '{"child":{"id":"child-1","goal":"scan child prompt"}}');
+});
+
 test("safeStringify handles circular references, BigInt, undefined, and throwing toJSON", () => {
   const circular = { a: 1, big: 2n };
   circular.self = circular;
@@ -435,10 +467,17 @@ test("safeStringify handles circular references, BigInt, undefined, and throwing
 test("plugin: registers startup and classifier hooks", () => {
   const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u", timeoutMs: 777 } });
   assert.deepEqual([...env.hooks.keys()].sort(), [
+    "after_tool_call",
+    "before_agent_run",
     "before_prompt_build",
     "before_tool_call",
     "gateway_start",
     "message_sending",
+    "message_sent",
+    "reply_payload_sending",
+    "subagent_delivery_target",
+    "subagent_ended",
+    "subagent_spawned",
     "tool_result_persist",
   ]);
   for (const entry of env.hooks.values()) {
@@ -498,6 +537,119 @@ test("plugin: before_prompt_build sends user prompt to Silmaril and returns unde
   });
 });
 
+test("plugin: before_agent_run blocks unsafe model submissions when enforcement is enabled", async () => {
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      blockMalicious: true,
+      shadowMode: false,
+    },
+  });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+
+  await withConsoleCapture(async ({ logs }) => {
+    const result = await hook(env, "before_agent_run")({
+      prompt: "delegate unsafe work to a subagent",
+      sessionId: "child-session",
+      agentId: "subagent-1",
+    }, {});
+    assert.equal(result.outcome, "block");
+    assert.equal(
+      result.reason,
+      "Silmaril Firewall blocked this request: Unsafe agent control attempt. Continue without using the blocked content.",
+    );
+    assert.ok(result.message.includes("Silmaril Firewall blocked unsafe content"));
+    assert.ok(result.message.includes("Surface: agent prompt"));
+    assertNoRawDecisionText(result.message, "delegate unsafe work to a subagent");
+    assert.equal(globalThis.__silmarilFirewallCalls[0].text, "delegate unsafe work to a subagent");
+    assert.ok(logs.some((line) => line.includes("[firewall] before_agent_run blocked:")));
+  });
+});
+
+test("plugin: after_tool_call scans child tool results in their execution path", async () => {
+  const env = registerPlugin();
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+
+  await withConsoleCapture(async ({ logs }) => {
+    const result = await hook(env, "after_tool_call")({
+      toolName: "exec",
+      toolCallId: "child-call",
+      sessionId: "child-session",
+      agentId: "child-agent",
+      result: { text: "child tool attempted unsafe output" },
+    }, {});
+    assert.equal(result, undefined);
+    assert.equal(globalThis.__silmarilFirewallCalls[0].text, "child tool attempted unsafe output");
+    assertClassifyOptions(globalThis.__silmarilFirewallCalls[0].options, {
+      hook: "TOOL_RESPONSE",
+      toolName: "exec",
+      eventType: "after_tool_call",
+    });
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.metadata.sessionId, "child-session");
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.metadata.agentId, "child-agent");
+    assert.ok(logs.some((line) => line.includes("[firewall] after_tool_call result:")));
+    assert.equal(logs.some((line) => line.includes("child tool attempted unsafe output")), false);
+  });
+});
+
+test("plugin: message_sent and subagent lifecycle hooks scan visible child boundaries", async () => {
+  const env = registerPlugin();
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+
+  await withConsoleCapture(async ({ logs }) => {
+    await hook(env, "message_sent")({
+      messageId: "msg-child",
+      sessionId: "child-session",
+      message: { content: [{ text: "unsafe delivered child output" }] },
+    }, {});
+    await hook(env, "subagent_delivery_target")({
+      parentSessionId: "parent-session",
+      childSessionId: "child-session",
+      prompt: "unsafe child routing prompt",
+    }, {});
+    await hook(env, "subagent_spawned")({
+      childSessionId: "child-session",
+      goal: "unsafe child spawn prompt",
+    }, {});
+    await hook(env, "subagent_ended")({
+      childSessionId: "child-session",
+      finalOutput: "unsafe child final output",
+    }, {});
+
+    assert.deepEqual(
+      globalThis.__silmarilFirewallCalls.map((call) => call.options.metadata.eventType),
+      ["message_sent", "subagent_delivery_target", "subagent_spawned", "subagent_ended"],
+    );
+    assert.equal(globalThis.__silmarilFirewallCalls[0].text, "unsafe delivered child output");
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.hook, "LLM_OUTPUT");
+    assert.equal(globalThis.__silmarilFirewallCalls[1].options.hook, "USER_INPUT");
+    assert.equal(globalThis.__silmarilFirewallCalls[2].options.hook, "USER_INPUT");
+    assert.equal(globalThis.__silmarilFirewallCalls[3].options.hook, "LLM_OUTPUT");
+    assert.ok(globalThis.__silmarilFirewallCalls[1].text.includes("unsafe child routing prompt"));
+    assert.ok(globalThis.__silmarilFirewallCalls[2].text.includes("unsafe child spawn prompt"));
+    assert.ok(globalThis.__silmarilFirewallCalls[3].text.includes("unsafe child final output"));
+    assert.ok(logs.some((line) => line.includes("[firewall] subagent_spawned result:")));
+    assert.ok(logs.some((line) => line.includes("[firewall] subagent_ended result:")));
+    assert.equal(logs.some((line) => line.includes("unsafe child final output")), false);
+  });
+});
+
 test("plugin: before_tool_call classifies safe-stringified params and passes through by default", async () => {
   const env = registerPlugin();
   const circular = { value: 1 };
@@ -540,7 +692,7 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
     }, {});
     assert.deepEqual(toolCallResult, {
       block: true,
-      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; prediction=MALICIOUS; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
+      blockReason: "Silmaril Firewall blocked this request: Unsafe agent control attempt. Continue without using the blocked content.",
     });
     const messageResult = await hook(env, "message_sending")({
       to: "user",
@@ -549,15 +701,39 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
     }, {});
     assert.equal(messageResult.cancel, true);
     assert.equal(messageResult.content.includes("raw malicious final assistant output"), false);
-    assert.equal(messageResult.content.includes('"openClawHookEvent": "message_sending"'), true);
-    assert.equal(messageResult.content.includes('"hook": "LLM_OUTPUT"'), true);
-    assert.equal(messageResult.content.includes('"messageId": "msg-1"'), true);
-    assert.equal(messageResult.content.includes('"score"'), false);
-    assert.equal(messageResult.content.includes('"threshold"'), false);
+    assert.equal(messageResult.content.includes("Silmaril Firewall blocked unsafe content"), true);
+    assert.equal(messageResult.content.includes("Surface: assistant message"), true);
+    assertNoRawDecisionText(messageResult.content, "raw malicious final assistant output");
+    const replyPayloadResult = await hook(env, "reply_payload_sending")({
+      payload: {
+        text: "raw malicious reply payload",
+        replyToId: "reply-1",
+        replyToTag: true,
+      },
+    }, {});
+    assert.equal(replyPayloadResult.payload.text.includes("Silmaril Firewall blocked unsafe content"), true);
+    assert.equal(replyPayloadResult.payload.text.includes("Surface: reply delivery payload"), true);
+    assertNoRawDecisionText(replyPayloadResult.payload.text, "raw malicious reply payload");
+    assert.deepEqual(replyPayloadResult.payload.presentation, {
+      title: "Silmaril Firewall blocked unsafe content",
+      tone: "danger",
+      blocks: [
+        { type: "text", text: "Surface: reply delivery payload" },
+        { type: "text", text: "Reason: Unsafe agent control attempt" },
+        { type: "divider" },
+        { type: "context", text: "The original reply payload was replaced before channel delivery." },
+        { type: "context", text: "Next step: Rephrase the request, remove sensitive content, or ask the user for a safer path." },
+      ],
+    });
+    assert.equal(replyPayloadResult.payload.isStatusNotice, true);
+    assert.equal(replyPayloadResult.payload.replyToId, "reply-1");
+    assert.equal(replyPayloadResult.payload.replyToTag, true);
     assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call blocked:")));
     assert.ok(logs.some((line) => line.includes("[firewall] message_sending blocked:")));
+    assert.ok(logs.some((line) => line.includes("[firewall] reply_payload_sending blocked:")));
     assert.equal(logs.some((line) => line.includes("rm -rf")), false);
     assert.equal(logs.some((line) => line.includes("raw malicious final assistant output")), false);
+    assert.equal(logs.some((line) => line.includes("raw malicious reply payload")), false);
   });
 });
 
@@ -659,7 +835,7 @@ test("plugin: before_tool_call uses config captured before classifier await", as
     });
     assert.deepEqual(await call, {
       block: true,
-      blockReason: "Silmaril Firewall blocked this tool call; hook=TOOL_CALL; prediction=MALICIOUS; primaryOutcome=control_abuse; score=0.99; threshold=0.5",
+      blockReason: "Silmaril Firewall blocked this request: Unsafe agent control attempt. Continue without using the blocked content.",
     });
   });
 });
