@@ -453,7 +453,9 @@ test("delivery and lifecycle extraction covers native OpenClaw payload shapes", 
     },
   }), "reply text\n\ntitle\ncontext");
   assert.equal(t.extractMessageSentText({ message: { content: [{ text: "delivered" }] } }), "delivered");
-  assert.equal(t.extractLifecycleText({ child: { id: "child-1", goal: "scan child prompt" } }), '{"child":{"id":"child-1","goal":"scan child prompt"}}');
+  assert.equal(t.extractLifecycleText({ goal: "scan child prompt", traceId: "secret-trace" }), "scan child prompt");
+  assert.equal(t.extractLifecycleText({ child: { id: "child-1", goal: "scan nested child prompt" } }), "scan nested child prompt");
+  assert.equal(t.extractLifecycleText({ child: { id: "child-1" }, traceId: "secret-trace" }), "");
 });
 
 test("safeStringify handles circular references, BigInt, undefined, and throwing toJSON", () => {
@@ -462,6 +464,12 @@ test("safeStringify handles circular references, BigInt, undefined, and throwing
   assert.equal(t.safeStringify(circular), '{"a":1,"big":"2","self":"[Circular]"}');
   assert.equal(t.safeStringify(undefined), "");
   assert.equal(t.safeStringify({ toJSON() { throw new Error("boom"); } }), "[object Object]");
+});
+
+test("describeRisk treats benign results without outcome as clean", () => {
+  assert.equal(t.describeRisk({ prediction: "BENIGN" }), "No flagged risk");
+  assert.equal(t.describeRisk({ prediction: "MALICIOUS" }), "Unsafe content");
+  assert.equal(t.describeRisk({ prediction: "MALICIOUS", primaryOutcome: "control_abuse" }), "Unsafe agent control attempt");
 });
 
 test("plugin: registers startup and classifier hooks", () => {

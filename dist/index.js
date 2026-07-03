@@ -445,6 +445,7 @@ function describeSurface(meta) {
 }
 function describeRisk(result) {
   const outcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome : void 0;
+  const prediction = typeof result.prediction === "string" ? result.prediction.trim().toLowerCase() : void 0;
   switch (outcome?.trim().toLowerCase()) {
     case "information_disclosure":
       return "Sensitive information disclosure";
@@ -460,7 +461,7 @@ function describeRisk(result) {
     case "benign":
       return "No flagged risk";
     case void 0:
-      return "Unsafe content";
+      return prediction === "benign" ? "No flagged risk" : "Unsafe content";
     default:
       return outcome.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
   }
@@ -669,7 +670,47 @@ function extractPresentationText(presentation) {
   return parts.join("\n");
 }
 function extractLifecycleText(event) {
-  return safeStringify(event ?? {});
+  const record = readRecord(event);
+  if (!record) {
+    return "";
+  }
+  const parts = [];
+  const seen = /* @__PURE__ */ new Set();
+  const add = (value) => {
+    const text = typeof value === "string" ? readString(value) : extractContentText(value);
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      parts.push(text);
+    }
+  };
+  const addRecordFields = (source) => {
+    if (!source) {
+      return;
+    }
+    for (const key of [
+      "message",
+      "content",
+      "text",
+      "prompt",
+      "goal",
+      "task",
+      "summary",
+      "result",
+      "finalOutput",
+      "output",
+      "childGoal",
+      "childSummary",
+      "deliveryTarget"
+    ]) {
+      add(source[key]);
+    }
+  };
+  addRecordFields(record);
+  addRecordFields(readRecord(record.child));
+  add(record.payload);
+  add(record.messages);
+  add(record.presentation);
+  return parts.join("\n");
 }
 function extractAgentRunText(event) {
   const record = readRecord(event);
@@ -699,6 +740,7 @@ const __testInternals = {
   buildMessagePresentation,
   buildBlockedReplacement,
   formatBlockReason,
+  describeRisk,
   buildHookLogMeta,
   readTraceId,
   logFields,

@@ -600,6 +600,7 @@ function describeSurface(meta: HookLogMeta): string {
 
 function describeRisk(result: BlockResult): string {
   const outcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome : undefined;
+  const prediction = typeof result.prediction === "string" ? result.prediction.trim().toLowerCase() : undefined;
   switch (outcome?.trim().toLowerCase()) {
     case "information_disclosure":
       return "Sensitive information disclosure";
@@ -615,7 +616,7 @@ function describeRisk(result: BlockResult): string {
     case "benign":
       return "No flagged risk";
     case undefined:
-      return "Unsafe content";
+      return prediction === "benign" ? "No flagged risk" : "Unsafe content";
     default:
       return outcome
         .replace(/[_-]+/g, " ")
@@ -852,7 +853,49 @@ function extractPresentationText(presentation: unknown): string {
 }
 
 function extractLifecycleText(event: unknown): string {
-  return safeStringify(event ?? {});
+  const record = readRecord(event);
+  if (!record) {
+    return "";
+  }
+
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: unknown): void => {
+    const text = typeof value === "string" ? readString(value) : extractContentText(value);
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      parts.push(text);
+    }
+  };
+  const addRecordFields = (source: Record<string, unknown> | undefined): void => {
+    if (!source) {
+      return;
+    }
+    for (const key of [
+      "message",
+      "content",
+      "text",
+      "prompt",
+      "goal",
+      "task",
+      "summary",
+      "result",
+      "finalOutput",
+      "output",
+      "childGoal",
+      "childSummary",
+      "deliveryTarget",
+    ]) {
+      add(source[key]);
+    }
+  };
+
+  addRecordFields(record);
+  addRecordFields(readRecord(record.child));
+  add(record.payload);
+  add(record.messages);
+  add(record.presentation);
+  return parts.join("\n");
 }
 
 function extractAgentRunText(event: unknown): string {
@@ -884,6 +927,7 @@ export const __testInternals = {
   buildMessagePresentation,
   buildBlockedReplacement,
   formatBlockReason,
+  describeRisk,
   buildHookLogMeta,
   readTraceId,
   logFields,
