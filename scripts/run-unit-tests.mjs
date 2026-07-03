@@ -810,6 +810,20 @@ test("decision: benign predictions pass and thresholds block conflicts", () => {
   }), false);
 });
 
+test("extractContentText handles deep and cyclic content safely", () => {
+  let deep = { text: "safe leaf" };
+  for (let i = 0; i < 80; i += 1) {
+    deep = { content: deep };
+  }
+  assert.equal(t.extractContentText(deep), "");
+
+  const cycle = {};
+  cycle.content = cycle;
+  assert.equal(t.extractContentText(cycle), "");
+
+  assert.equal(t.extractContentText([{ text: "one" }, { content: { text: "two" } }]), "one\ntwo");
+});
+
 test("plugin: before_tool_call uses config captured before classifier await", async () => {
   const config = {
     apiKey: "k",

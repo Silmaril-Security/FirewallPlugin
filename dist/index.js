@@ -458,6 +458,7 @@ function describeRisk(result) {
     case "service_disruption":
       return "Service disruption risk";
     case "benign":
+      return "No flagged risk";
     case void 0:
       return "Unsafe content";
     default:
@@ -577,32 +578,32 @@ function safeStringify(value) {
     return String(value ?? "");
   }
 }
-function extractContentText(content) {
+const MAX_CONTENT_TEXT_DEPTH = 24;
+function extractContentText(content, depth = 0, seen = /* @__PURE__ */ new WeakSet()) {
+  if (depth > MAX_CONTENT_TEXT_DEPTH) {
+    return "";
+  }
   if (typeof content === "string") {
     return content;
   }
   if (content && typeof content === "object" && !Array.isArray(content)) {
+    if (seen.has(content)) {
+      return "";
+    }
+    seen.add(content);
     const record = content;
     if (typeof record.text === "string") {
       return record.text;
     }
     if (record.content !== void 0) {
-      return extractContentText(record.content);
+      return extractContentText(record.content, depth + 1, seen);
     }
     return "";
   }
   if (!Array.isArray(content)) {
     return "";
   }
-  return content.map((part) => {
-    if (typeof part === "string") {
-      return part;
-    }
-    if (part && typeof part === "object" && typeof part.text === "string") {
-      return part.text;
-    }
-    return "";
-  }).join("\n");
+  return content.map((part) => extractContentText(part, depth + 1, seen)).join("\n");
 }
 function extractToolResultText(event) {
   return extractContentText(event?.message?.content);
@@ -707,6 +708,7 @@ const __testInternals = {
   safeErrorFields,
   safeErrorMessage,
   safeStringify,
+  extractContentText,
   extractToolResultText,
   extractAfterToolCallText,
   extractMessageSendingText,

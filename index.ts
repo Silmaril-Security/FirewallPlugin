@@ -613,6 +613,7 @@ function describeRisk(result: BlockResult): string {
     case "service_disruption":
       return "Service disruption risk";
     case "benign":
+      return "No flagged risk";
     case undefined:
       return "Unsafe content";
     default:
@@ -746,17 +747,26 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function extractContentText(content: unknown): string {
+const MAX_CONTENT_TEXT_DEPTH = 24;
+
+function extractContentText(content: unknown, depth = 0, seen = new WeakSet<object>()): string {
+  if (depth > MAX_CONTENT_TEXT_DEPTH) {
+    return "";
+  }
   if (typeof content === "string") {
     return content;
   }
   if (content && typeof content === "object" && !Array.isArray(content)) {
+    if (seen.has(content)) {
+      return "";
+    }
+    seen.add(content);
     const record = content as { text?: unknown; content?: unknown };
     if (typeof record.text === "string") {
       return record.text;
     }
     if (record.content !== undefined) {
-      return extractContentText(record.content);
+      return extractContentText(record.content, depth + 1, seen);
     }
     return "";
   }
@@ -764,15 +774,7 @@ function extractContentText(content: unknown): string {
     return "";
   }
   return content
-    .map((part) => {
-      if (typeof part === "string") {
-        return part;
-      }
-      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-        return (part as { text: string }).text;
-      }
-      return "";
-    })
+    .map((part) => extractContentText(part, depth + 1, seen))
     .join("\n");
 }
 
@@ -891,6 +893,7 @@ export const __testInternals = {
   safeErrorFields,
   safeErrorMessage,
   safeStringify,
+  extractContentText,
   extractToolResultText,
   extractAfterToolCallText,
   extractMessageSendingText,
