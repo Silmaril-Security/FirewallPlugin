@@ -50,16 +50,23 @@ Runtime behavior:
   loading
 - `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
   startup hooks
+- `before_agent_run` sends agent run text as `USER_INPUT`
 - `before_prompt_build` sends user prompt text as `USER_INPUT`
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `before_tool_call` can return `{ block: true, blockReason }` only when
   `shadowMode=false` and `blockMalicious=true`
+- `after_tool_call` sends tool result text as `TOOL_RESPONSE`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes; this external hook is observe-only and cannot replace tool results
 - `message_sending` sends final outbound assistant message text as `LLM_OUTPUT`
 - `message_sending` can return `{ cancel: true, content }` with safe replacement
   metadata only when `shadowMode=false` and `blockMalicious=true`
+- `reply_payload_sending` can rewrite unsafe final payloads with readable text and
+  native `MessagePresentation` blocks where OpenClaw provides that surface
+- `message_sent`, `subagent_delivery_target`, `subagent_spawned`, and
+  `subagent_ended` classify lifecycle text for visibility and log sanitized
+  summaries without attempting enforcement
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
@@ -234,12 +241,19 @@ for direct source loading or the CLI install path is unavailable.
    Status: loaded
    Format: openclaw
    Shape: hook-only
-    Typed hooks:
-    gateway_start
-    before_prompt_build
-    before_tool_call
-    tool_result_persist
-    message_sending
+   Typed hooks:
+   gateway_start
+   before_agent_run
+   before_prompt_build
+   before_tool_call
+   after_tool_call
+   tool_result_persist
+   message_sending
+   reply_payload_sending
+   message_sent
+   subagent_delivery_target
+   subagent_spawned
+   subagent_ended
    ```
 
 11. Optional hosted demo walkthrough:
