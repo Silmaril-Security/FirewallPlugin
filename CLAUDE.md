@@ -172,6 +172,9 @@ for direct source loading or the CLI install path is unavailable.
        "entries": {
          "firewall-plugin": {
            "enabled": true,
+           "hooks": {
+             "allowConversationAccess": true
+           },
            "config": {
              "apiKey": "<PLUGIN_OR_LEGACY_SILMARIL_API_KEY>",
              "silmarilApiKey": "<SILMARIL_API_KEY>",

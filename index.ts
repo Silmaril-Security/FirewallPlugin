@@ -103,6 +103,8 @@ export default definePluginEntry({
     const getRuntime = (): RuntimeClient | undefined => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
+        runtimeClient = undefined;
+        outboundClassificationCache.clear();
         if (!missingConfigWarned) {
           api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifications skipped");
           missingConfigWarned = true;
@@ -112,6 +114,7 @@ export default definePluginEntry({
 
       missingConfigWarned = false;
       if (!runtimeClient || !sameRuntimeConfig(runtimeClient.config, config)) {
+        outboundClassificationCache.clear();
         runtimeClient = {
           config,
           state: {
@@ -491,7 +494,7 @@ function outboundDedupeKey(meta: HookLogMeta, text: string): string {
   const stableEventId = meta.idempotencyKey ?? meta.messageId ?? meta.traceId ?? meta.runId;
   const contentHash = sha256(text);
   return stableEventId
-    ? `stable:${stableEventId}:${contentHash}`
+    ? `stable:${meta.conversationId ?? "unknown"}:${stableEventId}:${contentHash}`
     : `content:${meta.conversationId ?? "unknown"}:${contentHash}`;
 }
 
@@ -511,6 +514,7 @@ function buildStableRequestId(meta: HookLogMeta, text: string): string | undefin
   if (!stableEventId) return undefined;
   return `firewall-plugin-${sha256(safeStringify({
     hookName: meta.hookName,
+    conversationId: meta.conversationId,
     stableEventId,
     contentHash: sha256(text),
   }))}`;

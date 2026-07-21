@@ -23,6 +23,8 @@ var index_default = definePluginEntry({
     const getRuntime = () => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
+        runtimeClient = void 0;
+        outboundClassificationCache.clear();
         if (!missingConfigWarned) {
           api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifications skipped");
           missingConfigWarned = true;
@@ -31,6 +33,7 @@ var index_default = definePluginEntry({
       }
       missingConfigWarned = false;
       if (!runtimeClient || !sameRuntimeConfig(runtimeClient.config, config)) {
+        outboundClassificationCache.clear();
         runtimeClient = {
           config,
           state: {
@@ -348,7 +351,7 @@ async function classifyOutboundOnce(firewall, text, meta, cache, now = Date.now(
 function outboundDedupeKey(meta, text) {
   const stableEventId = meta.idempotencyKey ?? meta.messageId ?? meta.traceId ?? meta.runId;
   const contentHash = sha256(text);
-  return stableEventId ? `stable:${stableEventId}:${contentHash}` : `content:${meta.conversationId ?? "unknown"}:${contentHash}`;
+  return stableEventId ? `stable:${meta.conversationId ?? "unknown"}:${stableEventId}:${contentHash}` : `content:${meta.conversationId ?? "unknown"}:${contentHash}`;
 }
 function pruneOutboundCache(cache, now) {
   for (const [key, entry] of cache) {
@@ -360,6 +363,7 @@ function buildStableRequestId(meta, text) {
   if (!stableEventId) return void 0;
   return `firewall-plugin-${sha256(safeStringify({
     hookName: meta.hookName,
+    conversationId: meta.conversationId,
     stableEventId,
     contentHash: sha256(text)
   }))}`;

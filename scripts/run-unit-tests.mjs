@@ -483,6 +483,23 @@ test("safeStringify handles circular references, BigInt, undefined, and throwing
   assert.equal(t.safeStringify({ toJSON() { throw new Error("boom"); } }), "[object Object]");
 });
 
+test("stable request and outbound dedupe identities are conversation-scoped and content-sensitive", () => {
+  const meta = {
+    hookName: "message_sending",
+    conversationId: "session-1",
+    messageId: "message-1",
+  };
+  const firstRequest = t.buildStableRequestId(meta, "one");
+  assert.equal(firstRequest, t.buildStableRequestId(meta, "one"));
+  assert.notEqual(firstRequest, t.buildStableRequestId({ ...meta, conversationId: "session-2" }, "one"));
+  assert.notEqual(firstRequest, t.buildStableRequestId(meta, "two"));
+
+  const firstDedupe = t.outboundDedupeKey(meta, "one");
+  assert.equal(firstDedupe, t.outboundDedupeKey(meta, "one"));
+  assert.notEqual(firstDedupe, t.outboundDedupeKey({ ...meta, conversationId: "session-2" }, "one"));
+  assert.notEqual(firstDedupe, t.outboundDedupeKey(meta, "two"));
+});
+
 test("describeRisk treats benign results without outcome as clean", () => {
   assert.equal(t.describeRisk({ prediction: "BENIGN" }), "No flagged risk");
   assert.equal(t.describeRisk({ prediction: "MALICIOUS" }), "Unsafe content");
@@ -950,6 +967,29 @@ test("plugin: runtime config changes create a new Firewall client", async () => 
     globalThis.__silmarilFirewallInstances.map((entry) => entry.options.apiUrl),
     ["u1", "u2", "u2"],
   );
+});
+
+test("plugin: runtime config changes clear outbound classification decisions", async () => {
+  const config = { apiKey: "k", apiUrl: "u1", timeoutMs: 777 };
+  const env = registerPlugin({ config });
+  await withSilencedConsole(async () => {
+    await hook(env, "message_sending")({
+      messageId: "delivery-1",
+      sessionId: "session-1",
+      content: "same outbound content",
+    }, {});
+    assert.equal(globalThis.__silmarilFirewallCalls.length, 1);
+
+    config.apiUrl = "u2";
+    await hook(env, "reply_payload_sending")({
+      messageId: "delivery-1",
+      sessionId: "session-1",
+      payload: { text: "same outbound content" },
+    }, {});
+  });
+
+  assert.equal(globalThis.__silmarilFirewallCalls.length, 2);
+  assert.equal(globalThis.__silmarilFirewallInstances.length, 2);
 });
 
 test("plugin: tool_result_persist stays pass-through and returns immediately", async () => {
