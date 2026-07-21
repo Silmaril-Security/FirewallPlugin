@@ -51,7 +51,6 @@ Runtime behavior:
 - `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
   startup hooks
 - `before_agent_run` sends agent run text as `USER_INPUT`
-- `before_prompt_build` sends user prompt text as `USER_INPUT`
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `before_tool_call` can return `{ block: true, blockReason }` only when
   `shadowMode=false` and `blockMalicious=true`
@@ -64,14 +63,17 @@ Runtime behavior:
   metadata only when `shadowMode=false` and `blockMalicious=true`
 - `reply_payload_sending` can rewrite unsafe final payloads with readable text and
   native `MessagePresentation` blocks where OpenClaw provides that surface
-- `message_sent`, `subagent_delivery_target`, `subagent_spawned`, and
-  `subagent_ended` classify lifecycle text for visibility and log sanitized
-  summaries without attempting enforcement
+- `message_sent` emits content-free delivery telemetry without another
+  classifier call
+- `subagent_delivery_target`, `subagent_spawned`, and `subagent_ended` classify
+  lifecycle text for visibility and log sanitized summaries without attempting
+  enforcement
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
-- no classifier result is cached or consumed later
+- duplicate `message_sending` and `reply_payload_sending` callbacks share a
+  short-lived, content-sensitive classifier result
 - no warning, stub, prompt, system, or developer context is added
 - final assistant output can be canceled by the host when explicit blocking is
   enabled
@@ -91,9 +93,8 @@ Configuration fields:
 - `blockMalicious`: optional malicious blocking at every supported host
   enforcement boundary; default `false`; only effective when `shadowMode=false`
 
-Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
-OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
-that setting blocks the hook registration.
+The plugin entry must also set `hooks.allowConversationAccess=true`; OpenClaw
+otherwise blocks `before_agent_run` for non-bundled plugins.
 
 ## Fresh OpenClaw Setup
 
@@ -212,7 +213,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-firewall-plugin-1.0.0.tgz
+   openclaw plugins install ./silmaril-firewall-plugin-1.1.0.tgz
    openclaw plugins enable firewall-plugin
    ```
 
@@ -244,7 +245,6 @@ for direct source loading or the CLI install path is unavailable.
    Typed hooks:
    gateway_start
    before_agent_run
-   before_prompt_build
    before_tool_call
    after_tool_call
    tool_result_persist
@@ -280,7 +280,7 @@ for direct source loading or the CLI install path is unavailable.
 
     ```text
     firewall-plugin: installed
-    [firewall] before_prompt_build result:
+    [firewall] before_agent_run result:
     [firewall] before_tool_call result:
     [firewall] tool_result_persist result:
     [firewall] message_sending result:

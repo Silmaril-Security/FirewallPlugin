@@ -14,23 +14,23 @@ model submissions, `before_tool_call` blocks pending tool calls,
 `reply_payload_sending` replaces unsafe delivery payloads with a safe status
 notice. It requires both `shadowMode: false` and `blockMalicious: true`.
 
-The plugin targets OpenClaw plugin API `2026.5.18` and newer. Its manifest
-declares startup activation for hook capability loading, and the runtime entry
-registers typed Gateway hooks with `api.on(...)`.
+The plugin requires OpenClaw plugin API `2026.5.28` or newer and is tested with
+OpenClaw `2026.7.1-2`. Its manifest declares startup activation for hook
+capability loading, and the runtime entry registers typed Gateway hooks with
+`api.on(...)`.
 
 ## Runtime Hooks
 
 | OpenClaw hook | Silmaril label | Classified content |
 |---|---|---|
 | `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
-| `before_prompt_build` | `USER_INPUT` | User prompt text |
 | `before_agent_run` | `USER_INPUT` | Final agent prompt/message payload before model submission; can return OpenClaw's native block shape with a readable message |
 | `before_tool_call` | `TOOL_CALL` | Tool parameters; can return `{ "block": true, "blockReason": "..." }` when enforcement is explicitly enabled |
 | `after_tool_call` | `TOOL_RESPONSE` | Tool result text immediately after execution, including child-agent tool calls |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context; observe-only because external OpenClaw plugins cannot replace tool results |
 | `message_sending` | `LLM_OUTPUT` | Final outbound assistant message text; can return `{ "cancel": true, "content": "..." }` with a safe replacement summary when enforcement is explicitly enabled |
 | `reply_payload_sending` | `LLM_OUTPUT` | Normalized delivery payload; can replace unsafe payloads with readable text plus native `MessagePresentation` |
-| `message_sent` | `LLM_OUTPUT` | Delivered message payload for post-delivery visibility |
+| `message_sent` | n/a | Logs content-free delivery telemetry; does not reclassify delivered content |
 | `subagent_delivery_target` | `USER_INPUT` | Subagent delivery routing payload; observe-only compatibility hook |
 | `subagent_spawned` | `USER_INPUT` | Subagent spawn lifecycle payload; observe-only in OpenClaw |
 | `subagent_ended` | `LLM_OUTPUT` | Subagent completion payload; observe-only in OpenClaw |
@@ -39,12 +39,13 @@ Hook registration is unconditional, so OpenClaw can discover and invoke the
 Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
-Enforceable hooks await the Silmaril SDK directly with a plugin-owned timeout.
-`tool_result_persist`, `message_sent`, and the subagent lifecycle hooks classify
-for visibility but do not claim to block because OpenClaw exposes them as
-observer or compatibility surfaces. Image-only and other empty payloads are
-skipped. Logs include hook label, event type, tool/correlation identifiers when
-available, prediction, readable risk label, and block status. User-visible and
+Enforceable hooks await Silmaril SDK 0.5.0 with a plugin-owned timeout.
+`tool_result_persist` and subagent lifecycle hooks classify for visibility but
+do not claim to block because OpenClaw exposes them as observer or compatibility
+surfaces. `message_sending` and `reply_payload_sending` share a short-lived,
+content-sensitive result so duplicate callbacks make one SDK request; changed
+content is classified separately. Image-only and other empty payloads are
+skipped. Only `prediction === "MALICIOUS"` is enforceable. User-visible and
 model-visible feedback never includes raw classifier JSON, numeric scores or
 thresholds, detector maps, metadata dumps, or the original sensitive payload.
 
@@ -77,6 +78,9 @@ the rest of the user's OpenClaw config and add the absolute repository path to
     "entries": {
       "firewall-plugin": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {
           "apiKey": "your-plugin-or-legacy-silmaril-api-key",
           "silmarilApiKey": "your-silmaril-api-key",
@@ -99,6 +103,11 @@ from OpenClaw plugin config during hook execution. `silmarilApiKey` is preferred
 for Silmaril classification when present; `apiKey` remains supported as the
 legacy fallback and may otherwise be used as a plugin or OpenClaw identity key.
 
+OpenClaw requires `hooks.allowConversationAccess: true` for a non-bundled
+plugin to receive `before_agent_run`. Without that host permission, OpenClaw
+loads the remaining hooks but skips prompt classification and reports a plugin
+diagnostic.
+
 `timeoutMs` is optional. It defaults to `2500` and bounds each classifier
 request.
 
@@ -112,12 +121,9 @@ tool results, and OpenClaw's `subagent_spawned`, `subagent_ended`, and
 calls and tool results still pass through `before_tool_call`/`after_tool_call`
 inside the child execution path and are scanned there.
 
-Do not set `plugins.entries.firewall-plugin.hooks.allowPromptInjection=false`.
-OpenClaw treats `before_prompt_build` as a prompt-mutation-capable hook, and
-that setting blocks the hook registration.
-
-By default the plugin is pass-through only. It does not cache classifier
-results, add prompt/system/developer context, or register wrapper tools.
+By default the plugin is pass-through only. Apart from the bounded outbound
+delivery deduplication window, it does not cache classifier results, add
+prompt/system/developer context, or register wrapper tools.
 
 Configuration precedence is intentionally OpenClaw-native: hook execution reads
 `plugins.entries.firewall-plugin.config` from OpenClaw at runtime. The launcher
@@ -171,7 +177,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-firewall-plugin-1.0.0.tgz
+openclaw plugins install ./silmaril-firewall-plugin-1.1.0.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
@@ -197,7 +203,6 @@ Format: openclaw
 Shape: hook-only
 Typed hooks:
 gateway_start
-before_prompt_build
 before_agent_run
 before_tool_call
 after_tool_call
@@ -266,14 +271,13 @@ Check the gateway logs for the install confirmation and classification entries:
 
 ```text
 firewall-plugin: installed
-[firewall] before_prompt_build result:
 [firewall] before_agent_run result:
 [firewall] before_tool_call result:
 [firewall] after_tool_call result:
 [firewall] tool_result_persist result:
 [firewall] message_sending result:
 [firewall] reply_payload_sending result:
-[firewall] message_sent result:
+[firewall] message_sent observed:
 [firewall] subagent_delivery_target result:
 [firewall] subagent_spawned result:
 [firewall] subagent_ended result:

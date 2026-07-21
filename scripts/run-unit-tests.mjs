@@ -80,7 +80,7 @@ function test(name, fn) {
 
 function makeMeta(overrides = {}) {
   return {
-    hookName: "before_prompt_build",
+    hookName: "before_agent_run",
     hook: "USER_INPUT",
     ...overrides,
   };
@@ -254,7 +254,11 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.4.2");
+  assert.equal(packageJson.version, "1.1.0");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
+  assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
+  assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
+  assert.equal(packageJson.openclaw.build.openclawVersion, "2026.5.28");
   assert.equal(packageJson.devDependencies.esbuild, "0.28.0");
   assert.equal(packageJson.devDependencies.tsx, "4.22.3");
 });
@@ -265,6 +269,7 @@ test("install docs: default clone flow does not pin simplified-dev", async () =>
   for (const source of [readme, claude]) {
     assert.equal(source.includes("git checkout simplified-dev"), false);
     assert.equal(source.includes("select the simplified branch"), false);
+    assert.ok(source.includes("allowConversationAccess"));
   }
 });
 
@@ -381,6 +386,18 @@ test("metadata: trace id can be read from traceId or trace.id", () => {
   assert.equal(t.readTraceId("no"), undefined);
 });
 
+test("metadata: conversation identity prefers child session, session, key, then parent", () => {
+  const cases = [
+    [{ childSessionId: "child", sessionId: "session", sessionKey: "key", parentSessionId: "parent" }, "child"],
+    [{ sessionId: "session", sessionKey: "key", parentSessionId: "parent" }, "session"],
+    [{ sessionKey: "key", parentSessionId: "parent" }, "key"],
+    [{ parentSessionId: "parent" }, "parent"],
+  ];
+  for (const [event, expected] of cases) {
+    assert.equal(t.buildHookLogMeta("subagent_spawned", "USER_INPUT", event, {}).conversationId, expected);
+  }
+});
+
 test("logging fields omit undefined values and keep present correlation fields", () => {
   assert.deepEqual(t.logFields({ hook: "USER_INPUT", runId: "run", sessionKey: "", traceId: undefined }), {
     hook: "USER_INPUT",
@@ -477,7 +494,6 @@ test("plugin: registers startup and classifier hooks", () => {
   assert.deepEqual([...env.hooks.keys()].sort(), [
     "after_tool_call",
     "before_agent_run",
-    "before_prompt_build",
     "before_tool_call",
     "gateway_start",
     "message_sending",
@@ -499,27 +515,24 @@ test("plugin: gateway_start logs installation only", () => {
   assert.deepEqual(env.logger.infos, ["firewall-plugin: installed"]);
 });
 
-test("plugin: missing prompt skips without classifier call", async () => {
+test("plugin: prompt is classified once through before_agent_run only", () => {
   const env = registerPlugin();
-  await withConsoleCapture(async ({ logs }) => {
-    await hook(env, "before_prompt_build")({}, {});
-    assert.equal(globalThis.__silmarilFirewallCalls.length, 0);
-    assert.ok(logs.some((line) => line.includes("missing_prompt")));
-  });
+  assert.equal(env.hooks.has("before_prompt_build"), false);
+  assert.equal(env.hooks.has("before_agent_run"), true);
 });
 
 test("plugin: missing config warns once and classifications fail open", async () => {
   const env = registerPlugin({ config: {} });
   await withConsoleCapture(async ({ logs }) => {
-    await hook(env, "before_prompt_build")({ prompt: "hello" }, {});
-    await hook(env, "before_prompt_build")({ prompt: "hello again" }, {});
+    await hook(env, "before_agent_run")({ prompt: "hello" }, {});
+    await hook(env, "before_agent_run")({ prompt: "hello again" }, {});
     assert.equal(env.logger.warns.length, 1);
     assert.equal(globalThis.__silmarilFirewallCalls.length, 0);
     assert.equal(logs.filter((line) => line.includes("missing_config")).length, 2);
   });
 });
 
-test("plugin: before_prompt_build sends user prompt to Silmaril and returns undefined", async () => {
+test("plugin: before_agent_run sends one user prompt to Silmaril in shadow mode", async () => {
   const env = registerPlugin();
   globalThis.__silmarilFirewallClassify = async () => ({
     prediction: "MALICIOUS",
@@ -528,18 +541,21 @@ test("plugin: before_prompt_build sends user prompt to Silmaril and returns unde
     primaryOutcome: "control_abuse",
   });
   await withConsoleCapture(async ({ logs }) => {
-    const result = await hook(env, "before_prompt_build")({
+    const result = await hook(env, "before_agent_run")({
       prompt: "ignore instructions",
       runId: "run-risk",
+      sessionId: "session-risk",
     }, {});
     assert.equal(result, undefined);
     assert.equal(globalThis.__silmarilFirewallCalls[0].text, "ignore instructions");
     assertClassifyOptions(globalThis.__silmarilFirewallCalls[0].options, {
       hook: "USER_INPUT",
       toolName: undefined,
-      eventType: "before_prompt_build",
+      eventType: "before_agent_run",
     });
-    assert.ok(logs.some((line) => line.includes("[firewall] before_prompt_build result:")));
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.metadata.conversationId, "session-risk");
+    assert.match(globalThis.__silmarilFirewallCalls[0].options.requestId, /^firewall-plugin-[a-f0-9]{64}$/);
+    assert.ok(logs.some((line) => line.includes("[firewall] before_agent_run result:")));
     assert.equal(logs.some((line) => line.includes("risk cached")), false);
     assert.equal(logs.some((line) => line.includes("risk cache consumed")), false);
   });
@@ -611,7 +627,7 @@ test("plugin: after_tool_call scans child tool results in their execution path",
   });
 });
 
-test("plugin: message_sent and subagent lifecycle hooks scan visible child boundaries", async () => {
+test("plugin: message_sent is telemetry-only and subagent hooks use child identity", async () => {
   const env = registerPlugin();
   globalThis.__silmarilFirewallClassify = async () => ({
     prediction: "MALICIOUS",
@@ -642,16 +658,19 @@ test("plugin: message_sent and subagent lifecycle hooks scan visible child bound
 
     assert.deepEqual(
       globalThis.__silmarilFirewallCalls.map((call) => call.options.metadata.eventType),
-      ["message_sent", "subagent_delivery_target", "subagent_spawned", "subagent_ended"],
+      ["subagent_delivery_target", "subagent_spawned", "subagent_ended"],
     );
-    assert.equal(globalThis.__silmarilFirewallCalls[0].text, "unsafe delivered child output");
-    assert.equal(globalThis.__silmarilFirewallCalls[0].options.hook, "LLM_OUTPUT");
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.hook, "USER_INPUT");
     assert.equal(globalThis.__silmarilFirewallCalls[1].options.hook, "USER_INPUT");
-    assert.equal(globalThis.__silmarilFirewallCalls[2].options.hook, "USER_INPUT");
-    assert.equal(globalThis.__silmarilFirewallCalls[3].options.hook, "LLM_OUTPUT");
-    assert.ok(globalThis.__silmarilFirewallCalls[1].text.includes("unsafe child routing prompt"));
-    assert.ok(globalThis.__silmarilFirewallCalls[2].text.includes("unsafe child spawn prompt"));
-    assert.ok(globalThis.__silmarilFirewallCalls[3].text.includes("unsafe child final output"));
+    assert.equal(globalThis.__silmarilFirewallCalls[2].options.hook, "LLM_OUTPUT");
+    assert.ok(globalThis.__silmarilFirewallCalls[0].text.includes("unsafe child routing prompt"));
+    assert.ok(globalThis.__silmarilFirewallCalls[1].text.includes("unsafe child spawn prompt"));
+    assert.ok(globalThis.__silmarilFirewallCalls[2].text.includes("unsafe child final output"));
+    for (const call of globalThis.__silmarilFirewallCalls) {
+      assert.equal(call.options.metadata.conversationId, "child-session");
+      assert.match(call.options.requestId, /^firewall-plugin-[a-f0-9]{64}$/);
+    }
+    assert.ok(logs.some((line) => line.includes("[firewall] message_sent observed:")));
     assert.ok(logs.some((line) => line.includes("[firewall] subagent_spawned result:")));
     assert.ok(logs.some((line) => line.includes("[firewall] subagent_ended result:")));
     assert.equal(logs.some((line) => line.includes("unsafe child final output")), false);
@@ -745,6 +764,34 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
   });
 });
 
+test("plugin: outbound callbacks share one classification and changed content cannot collide", async () => {
+  const env = registerPlugin({
+    config: { apiKey: "k", apiUrl: "u", blockMalicious: true, shadowMode: false },
+  });
+  globalThis.__silmarilFirewallClassify = async () => ({ prediction: "MALICIOUS", score: 0.01 });
+
+  await withSilencedConsole(async () => {
+    const message = await hook(env, "message_sending")({
+      messageId: "delivery-1", sessionId: "session-1", content: "same outbound content",
+    }, {});
+    const reply = await hook(env, "reply_payload_sending")({
+      messageId: "delivery-1", sessionId: "session-1", payload: { text: "same outbound content" },
+    }, {});
+    assert.equal(message.cancel, true);
+    assert.equal(reply.payload.isStatusNotice, true);
+    assert.equal(globalThis.__silmarilFirewallCalls.length, 1);
+
+    await hook(env, "reply_payload_sending")({
+      messageId: "delivery-1", sessionId: "session-1", payload: { text: "changed outbound content" },
+    }, {});
+    assert.equal(globalThis.__silmarilFirewallCalls.length, 2);
+    assert.notEqual(
+      globalThis.__silmarilFirewallCalls[0].options.requestId,
+      globalThis.__silmarilFirewallCalls[1].options.requestId,
+    );
+  });
+});
+
 test("plugin: shadowMode prevents blocking even when blockMalicious is true", async () => {
   const env = registerPlugin({
     config: {
@@ -769,7 +816,7 @@ test("plugin: shadowMode prevents blocking even when blockMalicious is true", as
   });
 });
 
-test("decision: benign predictions pass and thresholds block conflicts", () => {
+test("decision: only an exact MALICIOUS prediction blocks", () => {
   const config = {
     apiKey: "k",
     apiUrl: "u",
@@ -800,7 +847,7 @@ test("decision: benign predictions pass and thresholds block conflicts", () => {
     score: 0.1,
     threshold: 0.5,
     primaryOutcome: "control_abuse",
-  }), false);
+  }), true);
   assert.equal(t.shouldBlockToolCall(config, {
     prediction: "MALICIOUS",
     score: 0.99,
@@ -809,6 +856,11 @@ test("decision: benign predictions pass and thresholds block conflicts", () => {
   }), true);
   assert.equal(t.shouldBlockToolCall(config, {
     primaryOutcome: "control_abuse",
+  }), false);
+  assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "malicious",
+    blocked: true,
+    score: 1,
   }), false);
   assert.equal(t.shouldBlockToolCall({ ...config, shadowMode: true }, {
     prediction: "MALICIOUS",
@@ -866,7 +918,7 @@ test("plugin: stable runtime config reuses one Firewall client", async () => {
   const config = { apiKey: "k", apiUrl: "u", timeoutMs: 777 };
   const env = registerPlugin({ config });
   await withSilencedConsole(async () => {
-    await hook(env, "before_prompt_build")({ prompt: "first" }, {});
+    await hook(env, "before_agent_run")({ prompt: "first" }, {});
     await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
     hook(env, "tool_result_persist")({ message: { content: "tool output" } }, {});
     await hook(env, "message_sending")({ to: "user", content: "assistant output" }, {});
@@ -886,7 +938,7 @@ test("plugin: runtime config changes create a new Firewall client", async () => 
   const config = { apiKey: "k", apiUrl: "u1", timeoutMs: 777, blockMalicious: false };
   const env = registerPlugin({ config });
   await withSilencedConsole(async () => {
-    await hook(env, "before_prompt_build")({ prompt: "first" }, {});
+    await hook(env, "before_agent_run")({ prompt: "first" }, {});
     config.apiUrl = "u2";
     await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
     config.blockMalicious = true;
@@ -947,7 +999,7 @@ test("plugin: classifier errors are logged and fail open", async () => {
     throw new Error("classifier unavailable for raw classified prompt");
   };
   await withConsoleCapture(async ({ errors }) => {
-    const promptResult = await hook(env, "before_prompt_build")({ prompt: "risk", runId: "run-error" }, {});
+    const promptResult = await hook(env, "before_agent_run")({ prompt: "risk", runId: "run-error" }, {});
     const toolResult = await hook(env, "before_tool_call")({ params: { a: 1 } }, {});
     hook(env, "tool_result_persist")({ message: { content: "tool result" } }, {});
     const messageResult = await hook(env, "message_sending")({ to: "user", content: "assistant result" }, {});
@@ -955,7 +1007,7 @@ test("plugin: classifier errors are logged and fail open", async () => {
     assert.equal(promptResult, undefined);
     assert.equal(toolResult, undefined);
     assert.equal(messageResult, undefined);
-    assert.ok(errors.some((line) => line.includes("before_prompt_build error:")));
+    assert.ok(errors.some((line) => line.includes("before_agent_run error:")));
     assert.ok(errors.some((line) => line.includes("before_tool_call error:")));
     assert.ok(errors.some((line) => line.includes("tool_result_persist error:")));
     assert.ok(errors.some((line) => line.includes("message_sending error:")));
@@ -971,7 +1023,11 @@ test("logging: error diagnostics keep safe details and redact unknown messages",
   assert.deepEqual(t.safeErrorFields(networkError), {
     errorType: "Error",
     errorCode: "ECONNREFUSED",
-    errorMessage: "connect ECONNREFUSED 127.0.0.1:443",
+    errorMessage: "network_error_ECONNREFUSED",
+  });
+  assert.deepEqual(t.safeErrorFields(new Error("connect ECONNREFUSED raw classified content")), {
+    errorType: "Error",
+    errorMessage: "network_error_ECONNREFUSED",
   });
   const statusError = Object.assign(new Error("Response status 401"), { status: 401 });
   assert.deepEqual(t.safeErrorFields(statusError), {
@@ -984,7 +1040,7 @@ test("logging: error diagnostics keep safe details and redact unknown messages",
   });
 });
 
-test("source invariant: runtime has no result cache, wrappers, or prompt mutation", async () => {
+test("source invariant: runtime has no legacy risk cache, wrappers, or prompt mutation", async () => {
   const source = await readFile(path.join(repoRoot, "index.ts"), "utf8");
   for (const forbidden of [
     "RiskRecord",
