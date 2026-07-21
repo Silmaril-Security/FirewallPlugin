@@ -1,10 +1,13 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
 import type { BlockResult } from "@silmaril-security/sdk";
+import { createHash } from "node:crypto";
 
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
 const MAX_CLASSIFY_TIMEOUT_MS = 10000;
+const OUTBOUND_DEDUPE_TTL_MS = 5000;
+const MAX_OUTBOUND_DEDUPE_ENTRIES = 256;
 
 type RuntimeConfig = {
   apiKey: string;
@@ -31,10 +34,18 @@ type HookLogMeta = {
   runId?: string;
   sessionKey?: string;
   sessionId?: string;
+  childSessionId?: string;
+  parentSessionId?: string;
+  conversationId?: string;
   agentId?: string;
   messageId?: string;
   traceId?: string;
   idempotencyKey?: string;
+};
+
+type OutboundCacheEntry = {
+  createdAt: number;
+  result: Promise<BlockResult | undefined>;
 };
 
 type BeforeToolCallBlock = {
@@ -87,10 +98,13 @@ export default definePluginEntry({
     const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
     let missingConfigWarned = false;
     let runtimeClient: RuntimeClient | undefined;
+    const outboundClassificationCache = new Map<string, OutboundCacheEntry>();
 
     const getRuntime = (): RuntimeClient | undefined => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
+        runtimeClient = undefined;
+        outboundClassificationCache.clear();
         if (!missingConfigWarned) {
           api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifications skipped");
           missingConfigWarned = true;
@@ -100,6 +114,7 @@ export default definePluginEntry({
 
       missingConfigWarned = false;
       if (!runtimeClient || !sameRuntimeConfig(runtimeClient.config, config)) {
+        outboundClassificationCache.clear();
         runtimeClient = {
           config,
           state: {
@@ -118,26 +133,6 @@ export default definePluginEntry({
 
     api.on("gateway_start", () => {
       api.logger.info("firewall-plugin: installed");
-    }, hookOptions);
-
-    api.on("before_prompt_build", async (event, ctx) => {
-      const meta = buildHookLogMeta("before_prompt_build", HookLabel.USER_INPUT, event, ctx);
-      if (typeof event?.prompt !== "string") {
-        logSkipped(meta, "missing_prompt");
-        return;
-      }
-
-      const runtime = getRuntime();
-      if (!runtime) {
-        logSkipped(meta, "missing_config");
-        return;
-      }
-
-      try {
-        await classifyHookPayload(runtime.state.firewall, event.prompt, meta);
-      } catch (err) {
-        logError(meta, err);
-      }
     }, hookOptions);
 
     api.on("before_agent_run", async (event, ctx) => {
@@ -247,7 +242,12 @@ export default definePluginEntry({
         }
 
         const runtimeConfig = runtime.config;
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyOutboundOnce(
+          runtime.state.firewall,
+          text,
+          meta,
+          outboundClassificationCache,
+        );
         if (shouldBlockClassification(runtimeConfig, result)) {
           const block = buildMessageSendingBlock(result, meta);
           logBlocked(meta, result);
@@ -274,7 +274,12 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyOutboundOnce(
+          runtime.state.firewall,
+          text,
+          meta,
+          outboundClassificationCache,
+        );
         if (shouldBlockClassification(runtime.config, result)) {
           const replacement = buildReplyPayloadSendingReplacement(event, result, meta);
           logBlocked(meta, result);
@@ -286,25 +291,9 @@ export default definePluginEntry({
       return undefined;
     }, hookOptions);
 
-    api.on("message_sent", async (event, ctx) => {
+    api.on("message_sent", (event, ctx) => {
       const meta = buildHookLogMeta("message_sent", HookLabel.LLM_OUTPUT, event, ctx);
-      const runtime = getRuntime();
-      if (!runtime) {
-        logSkipped(meta, "missing_config");
-        return;
-      }
-
-      try {
-        const text = extractMessageSentText(event);
-        if (!text.trim()) {
-          logSkipped(meta, "empty_payload");
-          return;
-        }
-
-        await classifyHookPayload(runtime.state.firewall, text, meta);
-      } catch (err) {
-        logError(meta, err);
-      }
+      logObserved(meta);
     }, hookOptions);
 
     api.on("subagent_delivery_target", async (event, ctx) => {
@@ -462,8 +451,10 @@ async function classifyHookPayload(
   const result = await firewall.classify(text, {
     hook: meta.hook,
     toolName: meta.toolName,
+    requestId: buildStableRequestId(meta, text),
     metadata: {
       eventType: meta.hookName,
+      conversationId: meta.conversationId,
       ...logFields(meta),
     },
   });
@@ -475,35 +466,69 @@ async function classifyHookPayload(
   return result;
 }
 
+async function classifyOutboundOnce(
+  firewall: Firewall,
+  text: string,
+  meta: HookLogMeta,
+  cache: Map<string, OutboundCacheEntry>,
+  now = Date.now(),
+): Promise<BlockResult | undefined> {
+  const key = outboundDedupeKey(meta, text);
+  pruneOutboundCache(cache, now);
+  const existing = cache.get(key);
+  if (existing && now - existing.createdAt <= OUTBOUND_DEDUPE_TTL_MS) {
+    return existing.result;
+  }
+
+  const result = classifyHookPayload(firewall, text, meta);
+  cache.set(key, { createdAt: now, result });
+  if (cache.size > MAX_OUTBOUND_DEDUPE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest) cache.delete(oldest);
+  }
+  result.catch(() => cache.delete(key));
+  return result;
+}
+
+function outboundDedupeKey(meta: HookLogMeta, text: string): string {
+  const stableEventId = meta.idempotencyKey ?? meta.messageId ?? meta.traceId ?? meta.runId;
+  const contentHash = sha256(text);
+  return stableEventId
+    ? `stable:${meta.conversationId ?? "unknown"}:${stableEventId}:${contentHash}`
+    : `content:${meta.conversationId ?? "unknown"}:${contentHash}`;
+}
+
+function pruneOutboundCache(cache: Map<string, OutboundCacheEntry>, now: number): void {
+  for (const [key, entry] of cache) {
+    if (now - entry.createdAt > OUTBOUND_DEDUPE_TTL_MS) cache.delete(key);
+  }
+}
+
+function buildStableRequestId(meta: HookLogMeta, text: string): string | undefined {
+  const stableEventId = meta.idempotencyKey
+    ?? meta.messageId
+    ?? meta.toolCallId
+    ?? meta.runId
+    ?? meta.traceId
+    ?? (meta.hookName.startsWith("subagent_") ? meta.childSessionId : undefined);
+  if (!stableEventId) return undefined;
+  return `firewall-plugin-${sha256(safeStringify({
+    hookName: meta.hookName,
+    conversationId: meta.conversationId,
+    stableEventId,
+    contentHash: sha256(text),
+  }))}`;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | undefined): result is BlockResult {
   if (config.shadowMode || !config.blockMalicious || !result) {
     return false;
   }
-  const primaryOutcome = typeof result.primaryOutcome === "string"
-    ? result.primaryOutcome.toLowerCase()
-    : undefined;
-  const prediction = typeof result.prediction === "string"
-    ? result.prediction.toLowerCase()
-    : undefined;
-  if (prediction === "benign") {
-    return false;
-  }
-
-  const score = typeof result.score === "number" && Number.isFinite(result.score)
-    ? result.score
-    : undefined;
-  const threshold = typeof result.threshold === "number" && Number.isFinite(result.threshold)
-    ? result.threshold
-    : undefined;
-  if (score !== undefined && threshold !== undefined) {
-    return score >= threshold;
-  }
-
-  const resultRecord = result as unknown as Record<string, unknown>;
-  if (readBoolean(resultRecord.blocked) === true) {
-    return true;
-  }
-  return prediction === "malicious";
+  return result.prediction === "MALICIOUS";
 }
 
 const shouldBlockToolCall = shouldBlockClassification;
@@ -581,7 +606,6 @@ function formatBlockReason(result: BlockResult): string {
 function describeSurface(meta: HookLogMeta): string {
   const labels: Record<string, string> = {
     before_agent_run: "agent prompt",
-    before_prompt_build: "agent prompt",
     before_tool_call: "tool call",
     after_tool_call: "tool result",
     tool_result_persist: "tool result",
@@ -628,14 +652,30 @@ function buildHookLogMeta(hookName: string, hook: HookLabel, event: unknown, ctx
   const eventRecord = readRecord(event);
   const ctxRecord = readRecord(ctx);
   const messageRecord = readRecord(eventRecord?.message);
+  const childRecord = readRecord(eventRecord?.child);
+  const childSessionId = readString(eventRecord?.childSessionId)
+    ?? readString(ctxRecord?.childSessionId)
+    ?? readString(childRecord?.sessionId);
+  const sessionId = readString(eventRecord?.sessionId)
+    ?? readString(ctxRecord?.sessionId)
+    ?? readString(messageRecord?.sessionId);
+  const sessionKey = readString(eventRecord?.sessionKey)
+    ?? readString(ctxRecord?.sessionKey)
+    ?? readString(messageRecord?.sessionKey);
+  const parentSessionId = readString(eventRecord?.parentSessionId)
+    ?? readString(ctxRecord?.parentSessionId)
+    ?? readString(childRecord?.parentSessionId);
   return {
     hookName,
     hook,
     toolName: readString(eventRecord?.toolName) ?? readString(ctxRecord?.toolName) ?? readString(messageRecord?.toolName),
     toolCallId: readString(eventRecord?.toolCallId) ?? readString(ctxRecord?.toolCallId) ?? readString(messageRecord?.toolCallId),
     runId: readString(eventRecord?.runId) ?? readString(ctxRecord?.runId) ?? readString(messageRecord?.runId),
-    sessionKey: readString(eventRecord?.sessionKey) ?? readString(ctxRecord?.sessionKey) ?? readString(messageRecord?.sessionKey),
-    sessionId: readString(eventRecord?.sessionId) ?? readString(ctxRecord?.sessionId) ?? readString(messageRecord?.sessionId),
+    sessionKey,
+    sessionId,
+    childSessionId,
+    parentSessionId,
+    conversationId: childSessionId ?? sessionId ?? sessionKey ?? parentSessionId,
     agentId: readString(eventRecord?.agentId) ?? readString(ctxRecord?.agentId) ?? readString(messageRecord?.agentId),
     messageId: readString(eventRecord?.messageId) ?? readString(ctxRecord?.messageId) ?? readString(messageRecord?.id),
     traceId: readString(eventRecord?.traceId) ?? readTraceId(eventRecord?.trace) ?? readString(ctxRecord?.traceId) ?? readTraceId(ctxRecord?.trace),
@@ -657,6 +697,9 @@ function logFields(meta: HookLogMeta): Record<string, string> {
       runId: meta.runId,
       sessionKey: meta.sessionKey,
       sessionId: meta.sessionId,
+      childSessionId: meta.childSessionId,
+      parentSessionId: meta.parentSessionId,
+      conversationId: meta.conversationId,
       agentId: meta.agentId,
       messageId: meta.messageId,
       traceId: meta.traceId,
@@ -678,6 +721,10 @@ function logBlocked(meta: HookLogMeta, result: BlockResult): void {
     prediction: result.prediction,
     risk: describeRisk(result),
   }));
+}
+
+function logObserved(meta: HookLogMeta): void {
+  console.log("[firewall] " + meta.hookName + " observed:", JSON.stringify(logFields(meta)));
 }
 
 function logError(meta: HookLogMeta, err: unknown): void {
@@ -719,8 +766,9 @@ function safeErrorMessage(message: string | undefined): string | undefined {
   if (statusMatch) {
     return `response_status_${statusMatch[1]}`;
   }
-  if (/\b(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/.test(firstLine)) {
-    return firstLine.slice(0, 160);
+  const networkMatch = firstLine.match(/\b(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/);
+  if (networkMatch) {
+    return `network_error_${networkMatch[1]}`;
   }
   if (/\b(timeout|timed out|aborted|abort)\b/i.test(firstLine)) {
     return "request_timeout";
@@ -918,6 +966,9 @@ export const __testInternals = {
   readIntegerInRange,
   readBoolean,
   classifyHookPayload,
+  classifyOutboundOnce,
+  outboundDedupeKey,
+  buildStableRequestId,
   shouldBlockClassification,
   shouldBlockToolCall,
   buildBlockResult,

@@ -1,8 +1,11 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
+import { createHash } from "node:crypto";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
 const MAX_CLASSIFY_TIMEOUT_MS = 1e4;
+const OUTBOUND_DEDUPE_TTL_MS = 5e3;
+const MAX_OUTBOUND_DEDUPE_ENTRIES = 256;
 var index_default = definePluginEntry({
   id: "firewall-plugin",
   name: "Firewall Plugin",
@@ -16,9 +19,12 @@ var index_default = definePluginEntry({
     const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
     let missingConfigWarned = false;
     let runtimeClient;
+    const outboundClassificationCache = /* @__PURE__ */ new Map();
     const getRuntime = () => {
       const config = resolveRuntimeConfig(api.pluginConfig);
       if (!config) {
+        runtimeClient = void 0;
+        outboundClassificationCache.clear();
         if (!missingConfigWarned) {
           api.logger.warn("firewall-plugin: apiKey or apiUrl missing - classifications skipped");
           missingConfigWarned = true;
@@ -27,6 +33,7 @@ var index_default = definePluginEntry({
       }
       missingConfigWarned = false;
       if (!runtimeClient || !sameRuntimeConfig(runtimeClient.config, config)) {
+        outboundClassificationCache.clear();
         runtimeClient = {
           config,
           state: {
@@ -43,23 +50,6 @@ var index_default = definePluginEntry({
     };
     api.on("gateway_start", () => {
       api.logger.info("firewall-plugin: installed");
-    }, hookOptions);
-    api.on("before_prompt_build", async (event, ctx) => {
-      const meta = buildHookLogMeta("before_prompt_build", HookLabel.USER_INPUT, event, ctx);
-      if (typeof event?.prompt !== "string") {
-        logSkipped(meta, "missing_prompt");
-        return;
-      }
-      const runtime = getRuntime();
-      if (!runtime) {
-        logSkipped(meta, "missing_config");
-        return;
-      }
-      try {
-        await classifyHookPayload(runtime.state.firewall, event.prompt, meta);
-      } catch (err) {
-        logError(meta, err);
-      }
     }, hookOptions);
     api.on("before_agent_run", async (event, ctx) => {
       const meta = buildHookLogMeta("before_agent_run", HookLabel.USER_INPUT, event, ctx);
@@ -154,7 +144,12 @@ var index_default = definePluginEntry({
           return;
         }
         const runtimeConfig = runtime.config;
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyOutboundOnce(
+          runtime.state.firewall,
+          text,
+          meta,
+          outboundClassificationCache
+        );
         if (shouldBlockClassification(runtimeConfig, result)) {
           const block = buildMessageSendingBlock(result, meta);
           logBlocked(meta, result);
@@ -178,7 +173,12 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyOutboundOnce(
+          runtime.state.firewall,
+          text,
+          meta,
+          outboundClassificationCache
+        );
         if (shouldBlockClassification(runtime.config, result)) {
           const replacement = buildReplyPayloadSendingReplacement(event, result, meta);
           logBlocked(meta, result);
@@ -189,23 +189,9 @@ var index_default = definePluginEntry({
       }
       return void 0;
     }, hookOptions);
-    api.on("message_sent", async (event, ctx) => {
+    api.on("message_sent", (event, ctx) => {
       const meta = buildHookLogMeta("message_sent", HookLabel.LLM_OUTPUT, event, ctx);
-      const runtime = getRuntime();
-      if (!runtime) {
-        logSkipped(meta, "missing_config");
-        return;
-      }
-      try {
-        const text = extractMessageSentText(event);
-        if (!text.trim()) {
-          logSkipped(meta, "empty_payload");
-          return;
-        }
-        await classifyHookPayload(runtime.state.firewall, text, meta);
-      } catch (err) {
-        logError(meta, err);
-      }
+      logObserved(meta);
     }, hookOptions);
     api.on("subagent_delivery_target", async (event, ctx) => {
       const meta = buildHookLogMeta("subagent_delivery_target", HookLabel.USER_INPUT, event, ctx);
@@ -332,8 +318,10 @@ async function classifyHookPayload(firewall, text, meta) {
   const result = await firewall.classify(text, {
     hook: meta.hook,
     toolName: meta.toolName,
+    requestId: buildStableRequestId(meta, text),
     metadata: {
       eventType: meta.hookName,
+      conversationId: meta.conversationId,
       ...logFields(meta)
     }
   });
@@ -344,25 +332,50 @@ async function classifyHookPayload(firewall, text, meta) {
   }));
   return result;
 }
+async function classifyOutboundOnce(firewall, text, meta, cache, now = Date.now()) {
+  const key = outboundDedupeKey(meta, text);
+  pruneOutboundCache(cache, now);
+  const existing = cache.get(key);
+  if (existing && now - existing.createdAt <= OUTBOUND_DEDUPE_TTL_MS) {
+    return existing.result;
+  }
+  const result = classifyHookPayload(firewall, text, meta);
+  cache.set(key, { createdAt: now, result });
+  if (cache.size > MAX_OUTBOUND_DEDUPE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest) cache.delete(oldest);
+  }
+  result.catch(() => cache.delete(key));
+  return result;
+}
+function outboundDedupeKey(meta, text) {
+  const stableEventId = meta.idempotencyKey ?? meta.messageId ?? meta.traceId ?? meta.runId;
+  const contentHash = sha256(text);
+  return stableEventId ? `stable:${meta.conversationId ?? "unknown"}:${stableEventId}:${contentHash}` : `content:${meta.conversationId ?? "unknown"}:${contentHash}`;
+}
+function pruneOutboundCache(cache, now) {
+  for (const [key, entry] of cache) {
+    if (now - entry.createdAt > OUTBOUND_DEDUPE_TTL_MS) cache.delete(key);
+  }
+}
+function buildStableRequestId(meta, text) {
+  const stableEventId = meta.idempotencyKey ?? meta.messageId ?? meta.toolCallId ?? meta.runId ?? meta.traceId ?? (meta.hookName.startsWith("subagent_") ? meta.childSessionId : void 0);
+  if (!stableEventId) return void 0;
+  return `firewall-plugin-${sha256(safeStringify({
+    hookName: meta.hookName,
+    conversationId: meta.conversationId,
+    stableEventId,
+    contentHash: sha256(text)
+  }))}`;
+}
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
 function shouldBlockClassification(config, result) {
   if (config.shadowMode || !config.blockMalicious || !result) {
     return false;
   }
-  const primaryOutcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome.toLowerCase() : void 0;
-  const prediction = typeof result.prediction === "string" ? result.prediction.toLowerCase() : void 0;
-  if (prediction === "benign") {
-    return false;
-  }
-  const score = typeof result.score === "number" && Number.isFinite(result.score) ? result.score : void 0;
-  const threshold = typeof result.threshold === "number" && Number.isFinite(result.threshold) ? result.threshold : void 0;
-  if (score !== void 0 && threshold !== void 0) {
-    return score >= threshold;
-  }
-  const resultRecord = result;
-  if (readBoolean(resultRecord.blocked) === true) {
-    return true;
-  }
-  return prediction === "malicious";
+  return result.prediction === "MALICIOUS";
 }
 const shouldBlockToolCall = shouldBlockClassification;
 function buildBlockResult(result, meta) {
@@ -427,7 +440,6 @@ function formatBlockReason(result) {
 function describeSurface(meta) {
   const labels = {
     before_agent_run: "agent prompt",
-    before_prompt_build: "agent prompt",
     before_tool_call: "tool call",
     after_tool_call: "tool result",
     tool_result_persist: "tool result",
@@ -470,14 +482,22 @@ function buildHookLogMeta(hookName, hook, event, ctx) {
   const eventRecord = readRecord(event);
   const ctxRecord = readRecord(ctx);
   const messageRecord = readRecord(eventRecord?.message);
+  const childRecord = readRecord(eventRecord?.child);
+  const childSessionId = readString(eventRecord?.childSessionId) ?? readString(ctxRecord?.childSessionId) ?? readString(childRecord?.sessionId);
+  const sessionId = readString(eventRecord?.sessionId) ?? readString(ctxRecord?.sessionId) ?? readString(messageRecord?.sessionId);
+  const sessionKey = readString(eventRecord?.sessionKey) ?? readString(ctxRecord?.sessionKey) ?? readString(messageRecord?.sessionKey);
+  const parentSessionId = readString(eventRecord?.parentSessionId) ?? readString(ctxRecord?.parentSessionId) ?? readString(childRecord?.parentSessionId);
   return {
     hookName,
     hook,
     toolName: readString(eventRecord?.toolName) ?? readString(ctxRecord?.toolName) ?? readString(messageRecord?.toolName),
     toolCallId: readString(eventRecord?.toolCallId) ?? readString(ctxRecord?.toolCallId) ?? readString(messageRecord?.toolCallId),
     runId: readString(eventRecord?.runId) ?? readString(ctxRecord?.runId) ?? readString(messageRecord?.runId),
-    sessionKey: readString(eventRecord?.sessionKey) ?? readString(ctxRecord?.sessionKey) ?? readString(messageRecord?.sessionKey),
-    sessionId: readString(eventRecord?.sessionId) ?? readString(ctxRecord?.sessionId) ?? readString(messageRecord?.sessionId),
+    sessionKey,
+    sessionId,
+    childSessionId,
+    parentSessionId,
+    conversationId: childSessionId ?? sessionId ?? sessionKey ?? parentSessionId,
     agentId: readString(eventRecord?.agentId) ?? readString(ctxRecord?.agentId) ?? readString(messageRecord?.agentId),
     messageId: readString(eventRecord?.messageId) ?? readString(ctxRecord?.messageId) ?? readString(messageRecord?.id),
     traceId: readString(eventRecord?.traceId) ?? readTraceId(eventRecord?.trace) ?? readString(ctxRecord?.traceId) ?? readTraceId(ctxRecord?.trace),
@@ -497,6 +517,9 @@ function logFields(meta) {
       runId: meta.runId,
       sessionKey: meta.sessionKey,
       sessionId: meta.sessionId,
+      childSessionId: meta.childSessionId,
+      parentSessionId: meta.parentSessionId,
+      conversationId: meta.conversationId,
       agentId: meta.agentId,
       messageId: meta.messageId,
       traceId: meta.traceId,
@@ -516,6 +539,9 @@ function logBlocked(meta, result) {
     prediction: result.prediction,
     risk: describeRisk(result)
   }));
+}
+function logObserved(meta) {
+  console.log("[firewall] " + meta.hookName + " observed:", JSON.stringify(logFields(meta)));
 }
 function logError(meta, err) {
   console.error("[firewall] " + meta.hookName + " error:", JSON.stringify({
@@ -552,8 +578,9 @@ function safeErrorMessage(message) {
   if (statusMatch) {
     return `response_status_${statusMatch[1]}`;
   }
-  if (/\b(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/.test(firstLine)) {
-    return firstLine.slice(0, 160);
+  const networkMatch = firstLine.match(/\b(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/);
+  if (networkMatch) {
+    return `network_error_${networkMatch[1]}`;
   }
   if (/\b(timeout|timed out|aborted|abort)\b/i.test(firstLine)) {
     return "request_timeout";
@@ -731,6 +758,9 @@ const __testInternals = {
   readIntegerInRange,
   readBoolean,
   classifyHookPayload,
+  classifyOutboundOnce,
+  outboundDedupeKey,
+  buildStableRequestId,
   shouldBlockClassification,
   shouldBlockToolCall,
   buildBlockResult,

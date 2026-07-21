@@ -16,9 +16,12 @@ Format: openclaw
 Shape: hook-only
 Typed hooks:
 gateway_start
-before_prompt_build
+before_agent_run
 before_tool_call
 tool_result_persist
+message_sending
+reply_payload_sending
+message_sent
 ```
 
 The plugin must not register wrapper tools, false-positive tools, exporters,
@@ -34,6 +37,9 @@ Configure:
     "entries": {
       "firewall-plugin": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {
           "silmarilApiKey": "<silmaril-api-key>",
           "apiUrl": "https://<api-id>.execute-api.<region>.amazonaws.com/alpha/classify",
@@ -61,7 +67,7 @@ Expected logs:
 
 ```text
 firewall-plugin: installed
-[firewall] before_prompt_build result:
+[firewall] before_agent_run result:
 [firewall] before_tool_call result:
 [firewall] tool_result_persist result:
 ```
@@ -75,10 +81,10 @@ Configure `shadowMode: false` and `blockMalicious: true`, then run a tool call
 that the classifier returns as malicious. Expected behavior:
 
 - `before_tool_call` returns `{ "block": true, "blockReason": "..." }`.
-- The block reason includes hook label, primary outcome, score, and threshold.
+- The block reason includes a readable surface and risk label.
 - The block reason does not include raw prompt text, tool parameters, or tool
   result text.
-- `before_prompt_build` and `tool_result_persist` still return `undefined`.
+- `tool_result_persist` still returns `undefined`.
 
 ## Invariants
 
