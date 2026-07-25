@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdir, rm, readFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -12,6 +22,7 @@ const outFile = path.join(outDir, "index-under-test.mjs");
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
+process.env.SILMARIL_LOCAL_EVENT_DIR = path.join(outDir, "evidence");
 
 await build({
   entryPoints: [path.join(repoRoot, "index.ts")],
@@ -124,6 +135,15 @@ function resetFirewallStub() {
   globalThis.__silmarilFirewallInstances = [];
 }
 
+test("production entry bundles the local evidence implementation", async () => {
+  const productionEntry = await readFile(
+    path.join(repoRoot, "dist", "index.js"),
+    "utf8",
+  );
+  assert.equal(productionEntry.includes('from "./local-evidence"'), false);
+  assert.equal(productionEntry.includes("function buildLocalProtectionEvent"), true);
+});
+
 function registerPlugin({ config = { apiKey: "test-key", apiUrl: "https://alpha.example/classify" } } = {}) {
   resetFirewallStub();
 
@@ -157,6 +177,24 @@ function hook(env, name) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForJSONFiles(directory, expectedCount = 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const entries = await readdir(directory).catch(() => []);
+    const jsonFiles = entries.filter((entry) => entry.endsWith(".json"));
+    if (jsonFiles.length >= expectedCount) {
+      return jsonFiles.sort();
+    }
+    await sleep(5);
+  }
+  assert.fail(`timed out waiting for ${expectedCount} local evidence file(s)`);
+}
+
+async function readOnlyJSONEvent(directory) {
+  const files = await waitForJSONFiles(directory);
+  assert.equal(files.length, 1);
+  return JSON.parse(await readFile(path.join(directory, files[0]), "utf8"));
 }
 
 function assertClassifyOptions(options, expected) {
@@ -254,7 +292,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.version, "1.1.0");
+  assert.equal(packageJson.version, "1.1.1");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
@@ -809,7 +847,7 @@ test("plugin: outbound callbacks share one classification and changed content ca
   });
 });
 
-test("plugin: shadowMode prevents blocking even when blockMalicious is true", async () => {
+test("plugin: Shadow is silent and preserves every supported boundary", async () => {
   const env = registerPlugin({
     config: {
       apiKey: "k",
@@ -825,11 +863,25 @@ test("plugin: shadowMode prevents blocking even when blockMalicious is true", as
     primaryOutcome: "control_abuse",
   });
 
+  const cases = [
+    ["before_agent_run", { prompt: "unsafe prompt", sessionId: "s1" }, {}],
+    ["before_tool_call", { toolName: "exec", params: { command: "unsafe" } }, { sessionId: "s1", toolCallId: "c1" }],
+    ["after_tool_call", { toolName: "exec", result: "unsafe result" }, { sessionId: "s1", toolCallId: "c1" }],
+    ["tool_result_persist", { message: { content: "unsafe result" } }, { sessionId: "s1", toolCallId: "c1" }],
+    ["message_sending", { messageId: "m1", sessionId: "s1", content: "unsafe output" }, {}],
+    ["reply_payload_sending", { messageId: "m2", sessionId: "s1", payload: { text: "unsafe output" } }, {}],
+    ["subagent_delivery_target", { childGoal: "unsafe goal" }, { sessionId: "s1", childSessionId: "s2" }],
+    ["subagent_spawned", { childGoal: "unsafe goal" }, { sessionId: "s1", childSessionId: "s2" }],
+    ["subagent_ended", { childSummary: "unsafe summary" }, { sessionId: "s1", childSessionId: "s2" }],
+  ];
   await withSilencedConsole(async () => {
-    const result = await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "false" } }, {});
-    const messageResult = await hook(env, "message_sending")({ to: "user", content: "assistant output" }, {});
-    assert.equal(result, undefined);
-    assert.equal(messageResult, undefined);
+    for (const [name, event, context] of cases) {
+      const originalEvent = structuredClone(event);
+      const originalContext = structuredClone(context);
+      assert.equal(await hook(env, name)(event, context), undefined, name);
+      assert.deepEqual(event, originalEvent, name);
+      assert.deepEqual(context, originalContext, name);
+    }
   });
 });
 
@@ -1078,6 +1130,254 @@ test("logging: error diagnostics keep safe details and redact unknown messages",
   assert.deepEqual(t.safeErrorFields(new Error("classifier saw raw classified prompt")), {
     errorType: "Error",
   });
+});
+
+test("local evidence: schema is V1-compatible and excludes raw classified bytes", () => {
+  const rawCanary = "OPENCLAW_SECRET_CANARY raw prompt and tool args";
+  const eventInput = {
+    host: "openClaw",
+    hook: "pre_tool",
+    mode: "block",
+    rawText: rawCanary,
+    requestIdentity: "request-1",
+    sessionIdentity: "session-1",
+    toolName: "exec",
+    classification: {
+      prediction: "MALICIOUS",
+      score: 0.93,
+      threshold: 0.5,
+      primaryOutcome: "secret_exposure",
+    },
+    policyDecision: "block",
+    nativeAction: "block_returned",
+    producer: "firewall-plugin",
+    producerVersion: "1.1.1",
+    pluginVersion: "1.1.1",
+    policyVersion: "openclaw-plugin-policy-v1",
+  };
+  const event = t.buildLocalProtectionEvent({
+    ...eventInput,
+    occurredAt: new Date("2026-07-24T18:00:00.000Z"),
+  });
+  const retry = t.buildLocalProtectionEvent({
+    ...eventInput,
+    occurredAt: new Date("2026-07-24T18:00:05.000Z"),
+  });
+
+  assert.equal(event.schemaVersion, 1);
+  assert.match(event.id, /^protection-event:[a-f0-9]{64}$/);
+  assert.equal(event.occurredAt, "2026-07-24T18:00:00.000Z");
+  assert.equal(event.host, "openClaw");
+  assert.equal(event.hook, "pre_tool");
+  assert.equal(event.mode, "block");
+  assert.match(event.requestFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.match(event.sessionFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(event.riskClass, "credential_exposure");
+  assert.equal(event.attemptedConsequence.category, "credential_exposure");
+  assert.equal(event.prediction, "malicious");
+  assert.equal(event.modelScore, 0.93);
+  assert.equal(event.modelThreshold, 0.5);
+  assert.equal(event.policyDecision, "block");
+  assert.equal(event.nativeAction, "block_returned");
+  assert.equal(event.outcome, "not_observed");
+  assert.equal(event.evidenceTruth, "native_response_returned");
+  assert.equal(event.evidenceCompleteness, "partial");
+  assert.equal(event.provenance.pluginVersion, "1.1.1");
+  assert.equal(event.id, retry.id);
+  assert.equal(event.requestFingerprint, retry.requestFingerprint);
+  assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
+  assert.equal(JSON.stringify(event).includes(rawCanary), false);
+  assert.equal(JSON.stringify(event).includes("raw prompt"), false);
+  assert.equal(
+    t.resolveLocalEventDirectory({}, "/Users/tester"),
+    "/Users/tester/Library/Application Support/Silmaril/Evidence/incoming",
+  );
+  assert.equal(
+    t.resolveLocalEventDirectory(
+      { SILMARIL_LOCAL_EVENT_DIR: " /tmp/silmaril-events " },
+      "/Users/tester",
+    ),
+    "/tmp/silmaril-events",
+  );
+});
+
+test("local evidence: writer uses private atomic single-file publication", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-evidence-"));
+  const directory = path.join(root, "incoming");
+  try {
+    const destination = await t.emitLocalProtectionEvent({
+      host: "openClaw",
+      hook: "user_input",
+      mode: "shadow",
+      rawText: "OPENCLAW_ATOMIC_SECRET_CANARY",
+      requestIdentity: "request-atomic",
+      sessionIdentity: "session-atomic",
+      classification: {
+        prediction: "MALICIOUS",
+        score: 0.88,
+        threshold: 0.5,
+        primaryOutcome: "control_abuse",
+      },
+      policyDecision: "monitor",
+      nativeAction: "allowed",
+      producer: "firewall-plugin",
+      producerVersion: "1.1.1",
+      pluginVersion: "1.1.1",
+      policyVersion: "openclaw-plugin-policy-v1",
+    }, { directory });
+
+    const entries = await readdir(directory);
+    assert.deepEqual(entries, [path.basename(destination)]);
+    assert.equal(entries[0].endsWith(".json"), true);
+    assert.equal(entries.some((entry) => entry.endsWith(".tmp")), false);
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    const destinationStat = await stat(destination);
+    assert.equal(destinationStat.mode & 0o777, 0o600);
+    assert.ok(destinationStat.size > 0 && destinationStat.size < 64 * 1024);
+    const encoded = await readFile(destination, "utf8");
+    assert.equal(encoded.includes("OPENCLAW_ATOMIC_SECRET_CANARY"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local evidence: Repair marker has a stable opaque fingerprint", () => {
+  const marker = "silmaril-runtime-check:83a4c35e-da2d-47c6-9738-5ef7502600ca";
+  const event = t.buildLocalProtectionEvent({
+    host: "openClaw",
+    hook: "user_input",
+    mode: "shadow",
+    rawText: `Reply with OK only. ${marker}`,
+    classification: { prediction: "BENIGN", primaryOutcome: "benign" },
+    policyDecision: "allow",
+    nativeAction: "allowed",
+    producer: "firewall-plugin",
+    producerVersion: "1.1.1",
+    pluginVersion: "1.1.1",
+    policyVersion: "openclaw-plugin-policy-v1",
+  });
+  const serialized = JSON.stringify(event);
+  assert.equal(
+    event.requestFingerprint,
+    createHash("sha256").update(marker).digest("hex"),
+  );
+  assert.equal(serialized.includes(marker), false);
+});
+
+test("local evidence: Block and Shadow preserve distinct native action semantics", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-modes-"));
+  const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
+  try {
+    globalThis.__silmarilFirewallClassify = async () => ({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      primaryOutcome: "control_abuse",
+    });
+
+    const blockDirectory = path.join(root, "block");
+    process.env.SILMARIL_LOCAL_EVENT_DIR = blockDirectory;
+    const blockPlugin = registerPlugin({
+      config: {
+        apiKey: "k",
+        apiUrl: "u",
+        blockMalicious: true,
+        shadowMode: false,
+      },
+    });
+    globalThis.__silmarilFirewallClassify = async () => ({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      primaryOutcome: "control_abuse",
+    });
+    const blocked = await withSilencedConsole(() => hook(blockPlugin, "before_tool_call")(
+      { toolName: "exec", params: { command: "OPENCLAW_BLOCK_SECRET_CANARY" } },
+      { sessionId: "session-block", toolCallId: "call-block" },
+    ));
+    assert.equal(blocked.block, true);
+    const blockEvent = await readOnlyJSONEvent(blockDirectory);
+    assert.equal(blockEvent.mode, "block");
+    assert.equal(blockEvent.policyDecision, "block");
+    assert.equal(blockEvent.nativeAction, "block_returned");
+    assert.equal(blockEvent.outcome, "not_observed");
+    assert.equal(blockEvent.evidenceTruth, "native_response_returned");
+    assert.equal(JSON.stringify(blockEvent).includes("OPENCLAW_BLOCK_SECRET_CANARY"), false);
+
+    const shadowDirectory = path.join(root, "shadow");
+    process.env.SILMARIL_LOCAL_EVENT_DIR = shadowDirectory;
+    const shadowPlugin = registerPlugin({
+      config: {
+        apiKey: "k",
+        apiUrl: "u",
+        blockMalicious: true,
+        shadowMode: true,
+      },
+    });
+    globalThis.__silmarilFirewallClassify = async () => ({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      primaryOutcome: "control_abuse",
+    });
+    const allowed = await withSilencedConsole(() => hook(shadowPlugin, "before_tool_call")(
+      { toolName: "exec", params: { command: "OPENCLAW_SHADOW_SECRET_CANARY" } },
+      { sessionId: "session-shadow", toolCallId: "call-shadow" },
+    ));
+    assert.equal(allowed, undefined);
+    const shadowEvent = await readOnlyJSONEvent(shadowDirectory);
+    assert.equal(shadowEvent.mode, "shadow");
+    assert.equal(shadowEvent.policyDecision, "monitor");
+    assert.equal(shadowEvent.nativeAction, "allowed");
+    assert.equal(shadowEvent.outcome, "not_observed");
+    assert.equal(JSON.stringify(shadowEvent).includes("OPENCLAW_SHADOW_SECRET_CANARY"), false);
+  } finally {
+    if (savedDirectory === undefined) {
+      delete process.env.SILMARIL_LOCAL_EVENT_DIR;
+    } else {
+      process.env.SILMARIL_LOCAL_EVENT_DIR = savedDirectory;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local evidence: spool failure cannot weaken native blocking", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-failure-"));
+  const invalidDirectory = path.join(root, "not-a-directory");
+  const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
+  await writeFile(invalidDirectory, "occupied");
+  try {
+    process.env.SILMARIL_LOCAL_EVENT_DIR = invalidDirectory;
+    const env = registerPlugin({
+      config: {
+        apiKey: "k",
+        apiUrl: "u",
+        blockMalicious: true,
+        shadowMode: false,
+      },
+    });
+    globalThis.__silmarilFirewallClassify = async () => ({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      primaryOutcome: "system_compromise",
+    });
+
+    const result = await withSilencedConsole(() => hook(env, "before_tool_call")(
+      { toolName: "exec", params: { command: "unsafe" } },
+      { sessionId: "session-failure", toolCallId: "call-failure" },
+    ));
+    assert.equal(result.block, true);
+    assert.match(result.blockReason, /Silmaril Firewall blocked/);
+    await sleep(10);
+  } finally {
+    if (savedDirectory === undefined) {
+      delete process.env.SILMARIL_LOCAL_EVENT_DIR;
+    } else {
+      process.env.SILMARIL_LOCAL_EVENT_DIR = savedDirectory;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("source invariant: runtime has no legacy risk cache, wrappers, or prompt mutation", async () => {

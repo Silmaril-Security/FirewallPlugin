@@ -1,12 +1,12 @@
 {
   "name": "@silmaril/firewall-plugin",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/run-unit-tests.mjs",
-    "test:unit": "node scripts/run-unit-tests.mjs",
+    "test": "npm run build && node scripts/run-unit-tests.mjs",
+    "test:unit": "npm run build && node scripts/run-unit-tests.mjs",
     "prepack": "npm run build"
   },
   "files": [
