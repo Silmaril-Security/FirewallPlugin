@@ -130,6 +130,24 @@ Configuration precedence is intentionally OpenClaw-native: hook execution reads
 prints only the public demo URL and does not read or echo classifier
 configuration values. Do not commit API keys or write them into URLs.
 
+## Local protection evidence
+
+Flagged Block and Shadow decisions emit one bounded
+`LocalProtectionEventV1` JSON file for the local Silmaril app. Set
+`SILMARIL_LOCAL_EVENT_DIR` to override the spool directory; otherwise files go
+to `~/Library/Application Support/Silmaril/Evidence/incoming`.
+
+Publication uses a private temporary file followed by an atomic rename. The
+directory is mode `0700` and event files are mode `0600`. Emission is
+best-effort: filesystem failures never change the native OpenClaw decision.
+
+Events contain hashes, bounded risk metadata, classifier diagnostics, policy,
+and the action returned to OpenClaw. They never contain raw prompts, inputs,
+outputs, tool arguments, or credential values. Because the plugin does not
+independently observe downstream execution, it reports
+`evidenceTruth: plugin_reported` and `outcome: not_observed`; a native block
+response is not represented as independently verified prevention.
+
 ## Install
 
 This repository supports direct source loading and two CLI install styles.

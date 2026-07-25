@@ -2,7 +2,20 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
 import type { BlockResult } from "@silmaril-security/sdk";
 import { createHash } from "node:crypto";
+import {
+  buildLocalProtectionEvent,
+  emitLocalProtectionEvent,
+  emitLocalProtectionEventBestEffort,
+  resolveLocalEventDirectory,
+} from "./local-evidence";
+import type {
+  LocalHook,
+  LocalNativeAction,
+} from "./local-evidence";
 
+const PLUGIN_ID = "firewall-plugin";
+const PLUGIN_VERSION = "1.1.0";
+const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
 const MAX_CLASSIFY_TIMEOUT_MS = 10000;
@@ -152,9 +165,11 @@ export default definePluginEntry({
 
         const result = await classifyHookPayload(runtime.state.firewall, text, meta);
         if (shouldBlockClassification(runtime.config, result)) {
+          emitOpenClawLocalEvidence(meta, text, result, runtime.config, "block_returned", true);
           logBlocked(meta, result);
           return buildBeforeAgentRunBlock(result, meta);
         }
+        emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", true);
       } catch (err) {
         logError(meta, err);
       }
@@ -171,12 +186,29 @@ export default definePluginEntry({
 
       try {
         const runtimeConfig = runtime.config;
-        const result = await classifyHookPayload(runtime.state.firewall, safeStringify(event?.params ?? {}), meta);
+        const text = safeStringify(event?.params ?? {});
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
         if (shouldBlockClassification(runtimeConfig, result)) {
+          emitOpenClawLocalEvidence(
+            meta,
+            text,
+            result,
+            runtimeConfig,
+            "block_returned",
+            true,
+          );
           const block = buildBlockResult(result, meta);
           logBlocked(meta, result);
           return block;
         }
+        emitOpenClawLocalEvidence(
+          meta,
+          text,
+          result,
+          runtimeConfig,
+          "allowed",
+          true,
+        );
       } catch (err) {
         logError(meta, err);
       }
@@ -198,7 +230,8 @@ export default definePluginEntry({
           return;
         }
 
-        await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
       }
@@ -220,6 +253,9 @@ export default definePluginEntry({
         }
 
         void classifyHookPayload(runtime.state.firewall, text, meta)
+          .then((result) => {
+            emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
+          })
           .catch((err) => logError(meta, err));
       } catch (err) {
         logError(meta, err);
@@ -249,10 +285,12 @@ export default definePluginEntry({
           outboundClassificationCache,
         );
         if (shouldBlockClassification(runtimeConfig, result)) {
+          emitOpenClawLocalEvidence(meta, text, result, runtimeConfig, "block_returned", true);
           const block = buildMessageSendingBlock(result, meta);
           logBlocked(meta, result);
           return block;
         }
+        emitOpenClawLocalEvidence(meta, text, result, runtimeConfig, "allowed", true);
       } catch (err) {
         logError(meta, err);
       }
@@ -281,10 +319,19 @@ export default definePluginEntry({
           outboundClassificationCache,
         );
         if (shouldBlockClassification(runtime.config, result)) {
+          emitOpenClawLocalEvidence(
+            meta,
+            text,
+            result,
+            runtime.config,
+            "content_replaced",
+            true,
+          );
           const replacement = buildReplyPayloadSendingReplacement(event, result, meta);
           logBlocked(meta, result);
           return replacement;
         }
+        emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", true);
       } catch (err) {
         logError(meta, err);
       }
@@ -311,7 +358,8 @@ export default definePluginEntry({
           return;
         }
 
-        await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
       }
@@ -332,7 +380,8 @@ export default definePluginEntry({
           return;
         }
 
-        await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
       }
@@ -353,7 +402,8 @@ export default definePluginEntry({
           return;
         }
 
-        await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
       }
@@ -529,6 +579,58 @@ function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | 
     return false;
   }
   return result.prediction === "MALICIOUS";
+}
+
+function emitOpenClawLocalEvidence(
+  meta: HookLogMeta,
+  rawText: string,
+  result: BlockResult | undefined,
+  config: RuntimeConfig,
+  nativeAction: LocalNativeAction,
+  enforceableBoundary: boolean,
+): void {
+  if (!result || result.prediction !== "MALICIOUS") {
+    return;
+  }
+  const mode = !config.shadowMode && config.blockMalicious ? "block" : "shadow";
+  emitLocalProtectionEventBestEffort({
+    host: "openClaw",
+    hook: localHook(meta),
+    mode,
+    rawText,
+    requestIdentity: buildStableRequestId(meta, rawText),
+    sessionIdentity: meta.sessionId ?? meta.sessionKey ?? meta.conversationId,
+    toolName: meta.toolName,
+    classification: result,
+    policyDecision: mode === "block" && enforceableBoundary ? "block" : "monitor",
+    nativeAction,
+    producer: PLUGIN_ID,
+    producerVersion: PLUGIN_VERSION,
+    pluginVersion: PLUGIN_VERSION,
+    policyVersion: LOCAL_EVIDENCE_POLICY_VERSION,
+  });
+}
+
+function localHook(meta: HookLogMeta): LocalHook {
+  if (meta.hookName.startsWith("subagent_")) {
+    return "subagent";
+  }
+  switch (meta.hookName) {
+    case "before_agent_run":
+      return "user_input";
+    case "before_tool_call":
+      return "pre_tool";
+    case "after_tool_call":
+      return "post_tool";
+    case "tool_result_persist":
+      return "tool_result";
+    case "message_sending":
+    case "reply_payload_sending":
+    case "message_sent":
+      return "llm_output";
+    default:
+      return "unknown";
+  }
 }
 
 const shouldBlockToolCall = shouldBlockClassification;
@@ -997,4 +1099,9 @@ export const __testInternals = {
   extractPresentationText,
   extractLifecycleText,
   extractAgentRunText,
+  buildLocalProtectionEvent,
+  emitLocalProtectionEvent,
+  resolveLocalEventDirectory,
+  emitOpenClawLocalEvidence,
+  localHook,
 };
