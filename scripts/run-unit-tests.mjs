@@ -135,6 +135,15 @@ function resetFirewallStub() {
   globalThis.__silmarilFirewallInstances = [];
 }
 
+test("production entry bundles the local evidence implementation", async () => {
+  const productionEntry = await readFile(
+    path.join(repoRoot, "dist", "index.js"),
+    "utf8",
+  );
+  assert.equal(productionEntry.includes('from "./local-evidence"'), false);
+  assert.equal(productionEntry.includes("function buildLocalProtectionEvent"), true);
+});
+
 function registerPlugin({ config = { apiKey: "test-key", apiUrl: "https://alpha.example/classify" } } = {}) {
   resetFirewallStub();
 
