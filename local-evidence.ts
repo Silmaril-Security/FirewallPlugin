@@ -12,6 +12,7 @@ import path from "node:path";
 
 export const LOCAL_PROTECTION_EVENT_SCHEMA_VERSION = 1;
 export const MAX_LOCAL_PROTECTION_EVENT_BYTES = 64 * 1024;
+const RUNTIME_CHECK_MARKER = /\bsilmaril-runtime-check:([A-Za-z0-9-]{16,128})\b/;
 
 export type LocalHost = "openClaw" | "openCode";
 export type LocalHook =
@@ -71,7 +72,7 @@ export type LocalProtectionEventV1 = {
   riskClass: string;
   attemptedConsequence: {
     category: string;
-    summary: { value: string };
+    summary: string;
   };
   prediction: "benign" | "malicious" | "unknown" | "unavailable";
   modelScore?: number;
@@ -79,7 +80,7 @@ export type LocalProtectionEventV1 = {
   policyDecision: LocalPolicyDecision;
   nativeAction: LocalNativeAction;
   outcome: "not_observed";
-  evidenceTruth: "plugin_reported";
+  evidenceTruth: "plugin_reported" | "native_response_returned";
   evidenceCompleteness: "partial";
   provenance: {
     schemaVersion: 1;
@@ -114,12 +115,15 @@ export function buildLocalProtectionEvent(
 ): LocalProtectionEventV1 {
   const occurredAt = input.occurredAt ?? new Date();
   const observedAt = occurredAt.toISOString();
-  const requestFingerprint = fingerprint([
-    input.producer,
-    input.hook,
-    input.requestIdentity ?? "",
-    sha256(input.rawText),
-  ]);
+  const runtimeCheck = input.rawText.match(RUNTIME_CHECK_MARKER)?.[0];
+  const requestFingerprint = runtimeCheck
+    ? sha256(runtimeCheck)
+    : fingerprint([
+      input.producer,
+      input.hook,
+      input.requestIdentity ?? "",
+      sha256(input.rawText),
+    ]);
   const sessionFingerprint = input.sessionIdentity
     ? fingerprint([input.host, input.sessionIdentity])
     : undefined;
@@ -151,9 +155,9 @@ export function buildLocalProtectionEvent(
     riskClass: category,
     attemptedConsequence: {
       category,
-      summary: {
-        value: boundedSummary(CONSEQUENCE_SUMMARIES[category] ?? CONSEQUENCE_SUMMARIES.unknown),
-      },
+      summary: boundedSummary(
+        CONSEQUENCE_SUMMARIES[category] ?? CONSEQUENCE_SUMMARIES.unknown,
+      ),
     },
     prediction,
     modelScore,
@@ -161,7 +165,10 @@ export function buildLocalProtectionEvent(
     policyDecision: input.policyDecision,
     nativeAction: input.nativeAction,
     outcome: "not_observed" as const,
-    evidenceTruth: "plugin_reported" as const,
+    evidenceTruth: input.nativeAction === "block_returned"
+        || input.nativeAction === "content_replaced"
+      ? "native_response_returned" as const
+      : "plugin_reported" as const,
     evidenceCompleteness: "partial" as const,
     provenance: {
       schemaVersion: 1 as const,

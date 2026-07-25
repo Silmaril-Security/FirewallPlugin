@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   mkdir,
@@ -282,7 +283,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.version, "1.1.0");
+  assert.equal(packageJson.version, "1.1.1");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
@@ -837,7 +838,7 @@ test("plugin: outbound callbacks share one classification and changed content ca
   });
 });
 
-test("plugin: shadowMode prevents blocking even when blockMalicious is true", async () => {
+test("plugin: Shadow is silent and preserves every supported boundary", async () => {
   const env = registerPlugin({
     config: {
       apiKey: "k",
@@ -853,11 +854,25 @@ test("plugin: shadowMode prevents blocking even when blockMalicious is true", as
     primaryOutcome: "control_abuse",
   });
 
+  const cases = [
+    ["before_agent_run", { prompt: "unsafe prompt", sessionId: "s1" }, {}],
+    ["before_tool_call", { toolName: "exec", params: { command: "unsafe" } }, { sessionId: "s1", toolCallId: "c1" }],
+    ["after_tool_call", { toolName: "exec", result: "unsafe result" }, { sessionId: "s1", toolCallId: "c1" }],
+    ["tool_result_persist", { message: { content: "unsafe result" } }, { sessionId: "s1", toolCallId: "c1" }],
+    ["message_sending", { messageId: "m1", sessionId: "s1", content: "unsafe output" }, {}],
+    ["reply_payload_sending", { messageId: "m2", sessionId: "s1", payload: { text: "unsafe output" } }, {}],
+    ["subagent_delivery_target", { childGoal: "unsafe goal" }, { sessionId: "s1", childSessionId: "s2" }],
+    ["subagent_spawned", { childGoal: "unsafe goal" }, { sessionId: "s1", childSessionId: "s2" }],
+    ["subagent_ended", { childSummary: "unsafe summary" }, { sessionId: "s1", childSessionId: "s2" }],
+  ];
   await withSilencedConsole(async () => {
-    const result = await hook(env, "before_tool_call")({ toolName: "exec", params: { command: "false" } }, {});
-    const messageResult = await hook(env, "message_sending")({ to: "user", content: "assistant output" }, {});
-    assert.equal(result, undefined);
-    assert.equal(messageResult, undefined);
+    for (const [name, event, context] of cases) {
+      const originalEvent = structuredClone(event);
+      const originalContext = structuredClone(context);
+      assert.equal(await hook(env, name)(event, context), undefined, name);
+      assert.deepEqual(event, originalEvent, name);
+      assert.deepEqual(context, originalContext, name);
+    }
   });
 });
 
@@ -1127,8 +1142,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.1.0",
-    pluginVersion: "1.1.0",
+    producerVersion: "1.1.1",
+    pluginVersion: "1.1.1",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1156,9 +1171,9 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.policyDecision, "block");
   assert.equal(event.nativeAction, "block_returned");
   assert.equal(event.outcome, "not_observed");
-  assert.equal(event.evidenceTruth, "plugin_reported");
+  assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.1.0");
+  assert.equal(event.provenance.pluginVersion, "1.1.1");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1197,8 +1212,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.1.0",
-      pluginVersion: "1.1.0",
+      producerVersion: "1.1.1",
+      pluginVersion: "1.1.1",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1215,6 +1230,29 @@ test("local evidence: writer uses private atomic single-file publication", async
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("local evidence: Repair marker has a stable opaque fingerprint", () => {
+  const marker = "silmaril-runtime-check:83a4c35e-da2d-47c6-9738-5ef7502600ca";
+  const event = t.buildLocalProtectionEvent({
+    host: "openClaw",
+    hook: "user_input",
+    mode: "shadow",
+    rawText: `Reply with OK only. ${marker}`,
+    classification: { prediction: "BENIGN", primaryOutcome: "benign" },
+    policyDecision: "allow",
+    nativeAction: "allowed",
+    producer: "firewall-plugin",
+    producerVersion: "1.1.1",
+    pluginVersion: "1.1.1",
+    policyVersion: "openclaw-plugin-policy-v1",
+  });
+  const serialized = JSON.stringify(event);
+  assert.equal(
+    event.requestFingerprint,
+    createHash("sha256").update(marker).digest("hex"),
+  );
+  assert.equal(serialized.includes(marker), false);
 });
 
 test("local evidence: Block and Shadow preserve distinct native action semantics", async () => {
@@ -1254,7 +1292,7 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
     assert.equal(blockEvent.policyDecision, "block");
     assert.equal(blockEvent.nativeAction, "block_returned");
     assert.equal(blockEvent.outcome, "not_observed");
-    assert.equal(blockEvent.evidenceTruth, "plugin_reported");
+    assert.equal(blockEvent.evidenceTruth, "native_response_returned");
     assert.equal(JSON.stringify(blockEvent).includes("OPENCLAW_BLOCK_SECRET_CANARY"), false);
 
     const shadowDirectory = path.join(root, "shadow");

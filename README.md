@@ -195,7 +195,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-firewall-plugin-1.1.0.tgz
+openclaw plugins install ./silmaril-firewall-plugin-1.1.1.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```

@@ -14,7 +14,7 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.1.0";
+const PLUGIN_VERSION = "1.1.1";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -589,10 +589,11 @@ function emitOpenClawLocalEvidence(
   nativeAction: LocalNativeAction,
   enforceableBoundary: boolean,
 ): void {
-  if (!result || result.prediction !== "MALICIOUS") {
+  if (!result) {
     return;
   }
   const mode = !config.shadowMode && config.blockMalicious ? "block" : "shadow";
+  const malicious = result.prediction === "MALICIOUS";
   emitLocalProtectionEventBestEffort({
     host: "openClaw",
     hook: localHook(meta),
@@ -602,7 +603,11 @@ function emitOpenClawLocalEvidence(
     sessionIdentity: meta.sessionId ?? meta.sessionKey ?? meta.conversationId,
     toolName: meta.toolName,
     classification: result,
-    policyDecision: mode === "block" && enforceableBoundary ? "block" : "monitor",
+    policyDecision: malicious
+      ? mode === "block" && enforceableBoundary
+        ? "block"
+        : "monitor"
+      : "allow",
     nativeAction,
     producer: PLUGIN_ID,
     producerVersion: PLUGIN_VERSION,
