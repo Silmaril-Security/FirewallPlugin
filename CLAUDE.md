@@ -216,7 +216,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-firewall-plugin-1.1.1.tgz
+   openclaw plugins install ./silmaril-firewall-plugin-1.1.2.tgz
    openclaw plugins enable firewall-plugin
    ```
 

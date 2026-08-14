@@ -13,6 +13,10 @@
       "apiKey": { "type": "string" },
       "silmarilApiKey": { "type": "string" },
       "apiUrl": { "type": "string" },
+      "endpointId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
       "timeoutMs": {
         "type": "integer",
         "minimum": 250,
@@ -33,6 +37,7 @@
     "apiKey": { "label": "API Key", "sensitive": true },
     "silmarilApiKey": { "label": "Silmaril API Key", "sensitive": true },
     "apiUrl": { "label": "API URL" },
+    "endpointId": { "label": "Endpoint ID", "advanced": true },
     "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
     "shadowMode": { "label": "Shadow mode", "advanced": true },
     "blockMalicious": { "label": "Block malicious content at supported boundaries", "advanced": true }
