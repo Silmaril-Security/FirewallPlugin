@@ -203,6 +203,8 @@ function assertClassifyOptions(options, expected) {
   assert.equal(typeof options.metadata, "object");
   assert.equal(options.metadata.eventType, expected.eventType);
   assert.equal(options.metadata.hook, expected.hook);
+  assert.equal(options.metadata.silmaril.provenance.schema_version, 1);
+  assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
   if (expected.toolName === undefined) {
     assert.equal(options.metadata.toolName, undefined);
   } else {
@@ -262,6 +264,23 @@ test("config: timeout bounds are enforced", () => {
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: 10001 }).timeoutMs, 2500);
 });
 
+test("config and metadata use canonical plugin-owned endpoint provenance", () => {
+  const endpointId = "2b64e603-f82a-4aec-9524-9736472dc80a";
+  assert.equal(t.resolveRuntimeConfig({ apiKey: "key", apiUrl: "https://x", endpointId }).endpointId, endpointId);
+  assert.equal(t.resolveRuntimeConfig({ apiKey: "key", apiUrl: "https://x", endpointId: endpointId.toUpperCase() }).endpointId, undefined);
+  assert.deepEqual(t.withProvenance({
+    silmaril: { provenance: { harness: "spoofed" } },
+    keep: true,
+  }, endpointId), {
+    silmaril: {
+      integration: "firewall-plugin",
+      version: "1.1.2",
+      provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
+    },
+    keep: true,
+  });
+});
+
 test("config: shadow and enforcement booleans are parsed conservatively", () => {
   assert.equal(t.readBoolean(true), true);
   assert.equal(t.readBoolean("yes"), true);
@@ -292,7 +311,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.version, "1.1.1");
+  assert.equal(packageJson.version, "1.1.2");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
@@ -1151,8 +1170,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.1.1",
-    pluginVersion: "1.1.1",
+    producerVersion: "1.1.2",
+    pluginVersion: "1.1.2",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1182,7 +1201,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.1.1");
+  assert.equal(event.provenance.pluginVersion, "1.1.2");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1221,8 +1240,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.1.1",
-      pluginVersion: "1.1.1",
+      producerVersion: "1.1.2",
+      pluginVersion: "1.1.2",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1252,8 +1271,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.1.1",
-    pluginVersion: "1.1.1",
+    producerVersion: "1.1.2",
+    pluginVersion: "1.1.2",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);

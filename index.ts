@@ -14,7 +14,7 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.1.1";
+const PLUGIN_VERSION = "1.1.2";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -28,6 +28,7 @@ type RuntimeConfig = {
   timeoutMs: number;
   shadowMode: boolean;
   blockMalicious: boolean;
+  endpointId?: string;
 };
 
 type RuntimeState = {
@@ -163,7 +164,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
         if (shouldBlockClassification(runtime.config, result)) {
           emitOpenClawLocalEvidence(meta, text, result, runtime.config, "block_returned", true);
           logBlocked(meta, result);
@@ -187,7 +188,7 @@ export default definePluginEntry({
       try {
         const runtimeConfig = runtime.config;
         const text = safeStringify(event?.params ?? {});
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
         if (shouldBlockClassification(runtimeConfig, result)) {
           emitOpenClawLocalEvidence(
             meta,
@@ -230,7 +231,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -252,7 +253,7 @@ export default definePluginEntry({
           return;
         }
 
-        void classifyHookPayload(runtime.state.firewall, text, meta)
+        void classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId)
           .then((result) => {
             emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
           })
@@ -283,6 +284,7 @@ export default definePluginEntry({
           text,
           meta,
           outboundClassificationCache,
+          runtime.config.endpointId,
         );
         if (shouldBlockClassification(runtimeConfig, result)) {
           emitOpenClawLocalEvidence(meta, text, result, runtimeConfig, "block_returned", true);
@@ -317,6 +319,7 @@ export default definePluginEntry({
           text,
           meta,
           outboundClassificationCache,
+          runtime.config.endpointId,
         );
         if (shouldBlockClassification(runtime.config, result)) {
           emitOpenClawLocalEvidence(
@@ -358,7 +361,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -380,7 +383,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -402,7 +405,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta);
+        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -416,13 +419,15 @@ function sameRuntimeConfig(left: RuntimeConfig, right: RuntimeConfig): boolean {
     && left.apiUrl === right.apiUrl
     && left.timeoutMs === right.timeoutMs
     && left.shadowMode === right.shadowMode
-    && left.blockMalicious === right.blockMalicious;
+    && left.blockMalicious === right.blockMalicious
+    && left.endpointId === right.endpointId;
 }
 
 function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
   const config = readRecord(rawConfig);
   const apiKey = readString(config?.silmarilApiKey) ?? readString(config?.apiKey);
   const apiUrl = readString(config?.apiUrl);
+  const endpointId = readEndpointId(config?.endpointId);
   if (!apiKey || !apiUrl) {
     return undefined;
   }
@@ -430,6 +435,7 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
   return {
     apiKey,
     apiUrl,
+    ...(endpointId ? { endpointId } : {}),
     timeoutMs: readIntegerInRange(
       config?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
@@ -491,6 +497,7 @@ async function classifyHookPayload(
   firewall: Firewall,
   text: string,
   meta: HookLogMeta,
+  endpointId?: string,
 ): Promise<BlockResult | undefined> {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -502,11 +509,11 @@ async function classifyHookPayload(
     hook: meta.hook,
     toolName: meta.toolName,
     requestId: buildStableRequestId(meta, text),
-    metadata: {
+    metadata: withProvenance({
       eventType: meta.hookName,
       conversationId: meta.conversationId,
       ...logFields(meta),
-    },
+    }, endpointId),
   });
   console.log("[firewall] " + meta.hookName + " result:", JSON.stringify({
     ...logFields(meta),
@@ -521,6 +528,7 @@ async function classifyOutboundOnce(
   text: string,
   meta: HookLogMeta,
   cache: Map<string, OutboundCacheEntry>,
+  endpointId?: string,
   now = Date.now(),
 ): Promise<BlockResult | undefined> {
   const key = outboundDedupeKey(meta, text);
@@ -530,7 +538,7 @@ async function classifyOutboundOnce(
     return existing.result;
   }
 
-  const result = classifyHookPayload(firewall, text, meta);
+  const result = classifyHookPayload(firewall, text, meta, endpointId);
   cache.set(key, { createdAt: now, result });
   if (cache.size > MAX_OUTBOUND_DEDUPE_ENTRIES) {
     const oldest = cache.keys().next().value;
@@ -572,6 +580,33 @@ function buildStableRequestId(meta: HookLogMeta, text: string): string | undefin
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function withProvenance(
+  metadata: Record<string, unknown>,
+  endpointId?: string,
+): Record<string, unknown> {
+  const silmaril = readRecord(metadata.silmaril) ?? {};
+  return {
+    ...metadata,
+    silmaril: {
+      ...silmaril,
+      integration: PLUGIN_ID,
+      version: PLUGIN_VERSION,
+      provenance: omitUndefined({
+        schema_version: 1,
+        endpoint_id: endpointId,
+        harness: "openclaw",
+      }),
+    },
+  };
+}
+
+function readEndpointId(value: unknown): string | undefined {
+  const stringValue = readString(value);
+  return stringValue && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(stringValue)
+    ? stringValue
+    : undefined;
 }
 
 function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | undefined): result is BlockResult {
@@ -1068,6 +1103,7 @@ function extractAgentRunText(event: unknown): string {
 
 export const __testInternals = {
   resolveRuntimeConfig,
+  withProvenance,
   readRecord,
   readString,
   readIntegerInRange,

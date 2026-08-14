@@ -85,6 +85,7 @@ the rest of the user's OpenClaw config and add the absolute repository path to
           "apiKey": "your-plugin-or-legacy-silmaril-api-key",
           "silmarilApiKey": "your-silmaril-api-key",
           "apiUrl": "https://your-endpoint.execute-api.us-west-2.amazonaws.com/alpha/classify",
+          "endpointId": "2b64e603-f82a-4aec-9524-9736472dc80a",
           "timeoutMs": 2500,
           "shadowMode": true,
           "blockMalicious": false
@@ -110,6 +111,8 @@ diagnostic.
 
 `timeoutMs` is optional. It defaults to `2500` and bounds each classifier
 request.
+
+The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance`; without an endpoint ID the plugin continues with harness-only provenance.
 
 `shadowMode` defaults to `true` and preserves pass-through behavior. To enable
 blocking at every supported boundary, set both `shadowMode: false` and
@@ -195,7 +198,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-firewall-plugin-1.1.1.tgz
+openclaw plugins install ./silmaril-firewall-plugin-1.1.2.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
