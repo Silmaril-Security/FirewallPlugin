@@ -725,7 +725,7 @@ function shouldBlockClassification(config, result) {
   return effectiveMode(config, result) === "block" && result?.prediction === "MALICIOUS";
 }
 function effectiveMode(config, result) {
-  return readMode(result?.mode) ?? config.mode ?? "shadow";
+  return config.mode ?? readMode(result?.mode) ?? "shadow";
 }
 function emitOpenClawLocalEvidence(meta, rawText, result, config, nativeAction, enforceableBoundary, warnDelivery) {
   if (!result) {
