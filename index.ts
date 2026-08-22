@@ -476,8 +476,10 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
       MAX_CLASSIFY_TIMEOUT_MS,
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS,
     mode: readMode(config?.mode)
-      ?? legacyMode(readBoolean(config?.shadowMode))
-      ?? (readBoolean(config?.blockMalicious) === true ? "block" : undefined),
+      ?? legacyMode(
+        readBoolean(config?.shadowMode),
+        readBoolean(config?.blockMalicious),
+      ),
   };
 }
 
@@ -526,8 +528,17 @@ function readMode(value: unknown): FirewallMode | undefined {
   return value === "shadow" || value === "warn" || value === "block" ? value : undefined;
 }
 
-function legacyMode(shadowMode: boolean | undefined): FirewallMode | undefined {
-  return shadowMode === undefined ? undefined : shadowMode ? "shadow" : "block";
+function legacyMode(
+  shadowMode: boolean | undefined,
+  blockMalicious: boolean | undefined,
+): FirewallMode | undefined {
+  if (shadowMode === true) {
+    return "shadow";
+  }
+  if (blockMalicious === true) {
+    return "block";
+  }
+  return shadowMode === false ? "shadow" : undefined;
 }
 
 function omitUndefined<T extends Record<string, unknown>>(record: T): Partial<T> {

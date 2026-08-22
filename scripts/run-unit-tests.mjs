@@ -1038,6 +1038,44 @@ test("plugin: runtime config changes create a new Firewall client", async () => 
   );
 });
 
+test("plugin: legacy shadow and block flags preserve observe-only installs", async () => {
+  const observeOnly = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      shadowMode: false,
+      blockMalicious: false,
+    },
+  });
+  await withSilencedConsole(async () => {
+    const result = await hook(observeOnly, "before_agent_run")(
+      { prompt: "legacy observe-only" },
+      {},
+    );
+    assert.equal(result, undefined);
+  });
+  assert.equal(
+    globalThis.__silmarilFirewallInstances.at(-1).options.mode,
+    "shadow",
+  );
+
+  const blocking = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      shadowMode: false,
+      blockMalicious: true,
+    },
+  });
+  await withSilencedConsole(async () => {
+    await hook(blocking, "before_agent_run")({ prompt: "legacy blocking" }, {});
+  });
+  assert.equal(
+    globalThis.__silmarilFirewallInstances.at(-1).options.mode,
+    "block",
+  );
+});
+
 test("plugin: runtime config changes clear outbound classification decisions", async () => {
   const config = { apiKey: "k", apiUrl: "u1", timeoutMs: 777 };
   const env = registerPlugin({ config });

@@ -111,12 +111,13 @@ request.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance`; without an endpoint ID the plugin continues with harness-only provenance.
 
-`shadowMode` defaults to `true` and preserves pass-through behavior. To enable
-blocking at every supported boundary, set both `shadowMode: false` and
-`blockMalicious: true`. Blocking uses OpenClaw's documented native decision
-shapes for agent prompts, tool calls, assistant messages, and delivery payload
-replacement. The external plugin cannot retroactively block or replace persisted
-tool results, and OpenClaw's `subagent_spawned`, `subagent_ended`, and
+Omit `mode` to use the backend-configured mode, or set it to `shadow`, `warn`,
+or `block` for a pilot override. Existing configurations keep their legacy
+behavior: `shadowMode: true` is Shadow, and `shadowMode: false` blocks only when
+`blockMalicious: true`; otherwise it remains observe-only. Blocking uses
+OpenClaw's documented native decision shapes. The external plugin cannot
+retroactively block or replace persisted tool results, and OpenClaw's
+`subagent_spawned`, `subagent_ended`, and
 `subagent_delivery_target` hooks are observer or routing hooks. Child-agent tool
 calls and tool results still pass through `before_tool_call`/`after_tool_call`
 inside the child execution path and are scanned there.

@@ -583,7 +583,10 @@ function resolveRuntimeConfig(rawConfig) {
       MIN_CLASSIFY_TIMEOUT_MS,
       MAX_CLASSIFY_TIMEOUT_MS
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS,
-    mode: readMode(config?.mode) ?? legacyMode(readBoolean(config?.shadowMode)) ?? (readBoolean(config?.blockMalicious) === true ? "block" : void 0)
+    mode: readMode(config?.mode) ?? legacyMode(
+      readBoolean(config?.shadowMode),
+      readBoolean(config?.blockMalicious)
+    )
   };
 }
 function readRecord(value) {
@@ -622,8 +625,14 @@ function readBoolean(value) {
 function readMode(value) {
   return value === "shadow" || value === "warn" || value === "block" ? value : void 0;
 }
-function legacyMode(shadowMode) {
-  return shadowMode === void 0 ? void 0 : shadowMode ? "shadow" : "block";
+function legacyMode(shadowMode, blockMalicious) {
+  if (shadowMode === true) {
+    return "shadow";
+  }
+  if (blockMalicious === true) {
+    return "block";
+  }
+  return shadowMode === false ? "shadow" : void 0;
 }
 function omitUndefined2(record) {
   return Object.fromEntries(
