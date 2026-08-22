@@ -60,6 +60,7 @@ await build({
             };
             export class Firewall {
               constructor(options) {
+                this.options = options;
                 globalThis.__silmarilFirewallInstances ??= [];
                 globalThis.__silmarilFirewallInstances.push({ options, instance: this });
               }
@@ -67,9 +68,10 @@ await build({
                 globalThis.__silmarilFirewallCalls ??= [];
                 globalThis.__silmarilFirewallCalls.push({ text, options });
                 const handler = globalThis.__silmarilFirewallClassify;
-                return handler
+                const result = handler
                   ? await handler(text, options)
                   : { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+                return { ...result, mode: result.mode ?? this.options.mode ?? "shadow" };
               }
             }
           `,
@@ -235,8 +237,7 @@ test("config: trims required fields and applies timeout default", () => {
     apiKey: "key",
     apiUrl: "https://x",
     timeoutMs: 2500,
-    shadowMode: true,
-    blockMalicious: false,
+    mode: undefined,
   });
 });
 
@@ -245,8 +246,7 @@ test("config: silmarilApiKey is accepted and preferred over apiKey", () => {
     apiKey: "silmaril-key",
     apiUrl: "https://x",
     timeoutMs: 2500,
-    shadowMode: true,
-    blockMalicious: false,
+    mode: undefined,
   });
   assert.equal(
     t.resolveRuntimeConfig({
@@ -274,14 +274,14 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.1.2",
+      version: "1.2.0",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
   });
 });
 
-test("config: shadow and enforcement booleans are parsed conservatively", () => {
+test("config: explicit mode wins and legacy booleans map conservatively", () => {
   assert.equal(t.readBoolean(true), true);
   assert.equal(t.readBoolean("yes"), true);
   assert.equal(t.readBoolean("off"), false);
@@ -295,9 +295,10 @@ test("config: shadow and enforcement booleans are parsed conservatively", () => 
     apiKey: "k",
     apiUrl: "u",
     timeoutMs: 2500,
-    shadowMode: false,
-    blockMalicious: true,
+    mode: "block",
   });
+  assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", shadowMode: true }).mode, "shadow");
+  assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", mode: "warn", shadowMode: false }).mode, "warn");
 });
 
 test("package metadata: devDependencies is unique and complete", async () => {
@@ -311,8 +312,8 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.version, "1.1.2");
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
+  assert.equal(packageJson.version, "1.2.0");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
   assert.equal(packageJson.openclaw.build.openclawVersion, "2026.5.28");
@@ -568,6 +569,7 @@ test("plugin: registers startup and classifier hooks", () => {
   assert.deepEqual([...env.hooks.keys()].sort(), [
     "after_tool_call",
     "before_agent_run",
+    "before_prompt_build",
     "before_tool_call",
     "gateway_start",
     "message_sending",
@@ -589,10 +591,29 @@ test("plugin: gateway_start logs installation only", () => {
   assert.deepEqual(env.logger.infos, ["firewall-plugin: installed"]);
 });
 
-test("plugin: prompt is classified once through before_agent_run only", () => {
+test("plugin: prompt Warn context and Block gate surfaces are both registered", () => {
   const env = registerPlugin();
-  assert.equal(env.hooks.has("before_prompt_build"), false);
+  assert.equal(env.hooks.has("before_prompt_build"), true);
   assert.equal(env.hooks.has("before_agent_run"), true);
+});
+
+test("plugin: Warn adds one bounded same-turn context and shares the prompt classification", async () => {
+  const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u", mode: "warn" } });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+  const event = { prompt: "raw secret prompt", runId: "run-warn", sessionId: "session-warn" };
+  await withSilencedConsole(async () => {
+    const warning = await hook(env, "before_prompt_build")(event, {});
+    assert.match(warning.prependContext, /^Silmaril Firewall warning:/);
+    assert.equal(warning.prependContext.includes("raw secret prompt"), false);
+    assert.equal(warning.prependContext.includes("0.99"), false);
+    assert.equal(await hook(env, "before_agent_run")(event, {}), undefined);
+  });
+  assert.equal(globalThis.__silmarilFirewallCalls.length, 1);
 });
 
 test("plugin: missing config warns once and classifications fail open", async () => {
@@ -662,9 +683,7 @@ test("plugin: before_agent_run blocks unsafe model submissions when enforcement 
       result.reason,
       "Silmaril Firewall blocked this request: Unsafe agent control attempt. Continue without using the blocked content.",
     );
-    assert.ok(result.message.includes("Silmaril Firewall blocked unsafe content"));
-    assert.ok(result.message.includes("Surface: agent prompt"));
-    assertNoRawDecisionText(result.message, "delegate unsafe work to a subagent");
+    assert.equal("message" in result, false);
     assert.equal(globalThis.__silmarilFirewallCalls[0].text, "delegate unsafe work to a subagent");
     assert.ok(logs.some((line) => line.includes("[firewall] before_agent_run blocked:")));
   });
@@ -801,10 +820,8 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
       messageId: "msg-1",
     }, {});
     assert.equal(messageResult.cancel, true);
-    assert.equal(messageResult.content.includes("raw malicious final assistant output"), false);
-    assert.equal(messageResult.content.includes("Silmaril Firewall blocked unsafe content"), true);
-    assert.equal(messageResult.content.includes("Surface: assistant message"), true);
-    assertNoRawDecisionText(messageResult.content, "raw malicious final assistant output");
+    assert.match(messageResult.cancelReason, /^Silmaril Firewall blocked this request:/);
+    assert.equal("content" in messageResult, false);
     const replyPayloadResult = await hook(env, "reply_payload_sending")({
       payload: {
         text: "raw malicious reply payload",
@@ -812,23 +829,7 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
         replyToTag: true,
       },
     }, {});
-    assert.equal(replyPayloadResult.payload.text.includes("Silmaril Firewall blocked unsafe content"), true);
-    assert.equal(replyPayloadResult.payload.text.includes("Surface: reply delivery payload"), true);
-    assertNoRawDecisionText(replyPayloadResult.payload.text, "raw malicious reply payload");
-    assert.deepEqual(replyPayloadResult.payload.presentation, {
-      title: "Silmaril Firewall blocked unsafe content",
-      tone: "danger",
-      blocks: [
-        { type: "text", text: "Surface: reply delivery payload" },
-        { type: "text", text: "Reason: Unsafe agent control attempt" },
-        { type: "divider" },
-        { type: "context", text: "The original reply payload was replaced before channel delivery." },
-        { type: "context", text: "Next step: Rephrase the request, remove sensitive content, or ask the user for a safer path." },
-      ],
-    });
-    assert.equal(replyPayloadResult.payload.isStatusNotice, true);
-    assert.equal(replyPayloadResult.payload.replyToId, "reply-1");
-    assert.equal(replyPayloadResult.payload.replyToTag, true);
+    assert.deepEqual(replyPayloadResult, { cancel: true });
     assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call blocked:")));
     assert.ok(logs.some((line) => line.includes("[firewall] message_sending blocked:")));
     assert.ok(logs.some((line) => line.includes("[firewall] reply_payload_sending blocked:")));
@@ -852,7 +853,7 @@ test("plugin: outbound callbacks share one classification and changed content ca
       messageId: "delivery-1", sessionId: "session-1", payload: { text: "same outbound content" },
     }, {});
     assert.equal(message.cancel, true);
-    assert.equal(reply.payload.isStatusNotice, true);
+    assert.equal(reply.cancel, true);
     assert.equal(globalThis.__silmarilFirewallCalls.length, 1);
 
     await hook(env, "reply_payload_sending")({
@@ -909,8 +910,7 @@ test("decision: only an exact MALICIOUS prediction blocks", () => {
     apiKey: "k",
     apiUrl: "u",
     timeoutMs: 2500,
-    shadowMode: false,
-    blockMalicious: true,
+    mode: "block",
   };
   assert.equal(t.shouldBlockToolCall(config, {
     prediction: "BENIGN",
@@ -950,7 +950,7 @@ test("decision: only an exact MALICIOUS prediction blocks", () => {
     blocked: true,
     score: 1,
   }), false);
-  assert.equal(t.shouldBlockToolCall({ ...config, shadowMode: true }, {
+  assert.equal(t.shouldBlockToolCall({ ...config, mode: "shadow" }, {
     prediction: "MALICIOUS",
     score: 0.99,
     threshold: 0.5,
@@ -976,8 +976,7 @@ test("plugin: before_tool_call uses config captured before classifier await", as
   const config = {
     apiKey: "k",
     apiUrl: "u",
-    blockMalicious: true,
-    shadowMode: false,
+    mode: "block",
   };
   const env = registerPlugin({ config });
   let release;
@@ -988,7 +987,7 @@ test("plugin: before_tool_call uses config captured before classifier await", as
 
   await withSilencedConsole(async () => {
     const call = hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
-    config.shadowMode = true;
+    config.mode = "shadow";
     release({
       prediction: "MALICIOUS",
       score: 0.99,
@@ -1018,7 +1017,6 @@ test("plugin: stable runtime config reuses one Firewall client", async () => {
     apiKey: "k",
     apiUrl: "u",
     timeoutMs: 777,
-    shadowMode: true,
   });
 });
 
@@ -1170,8 +1168,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.1.2",
-    pluginVersion: "1.1.2",
+    producerVersion: "1.2.0",
+    pluginVersion: "1.2.0",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1201,7 +1199,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.1.2");
+  assert.equal(event.provenance.pluginVersion, "1.2.0");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1240,8 +1238,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.1.2",
-      pluginVersion: "1.1.2",
+      producerVersion: "1.2.0",
+      pluginVersion: "1.2.0",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1271,8 +1269,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.1.2",
-    pluginVersion: "1.1.2",
+    producerVersion: "1.2.0",
+    pluginVersion: "1.2.0",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -1410,7 +1408,6 @@ test("source invariant: runtime has no legacy risk cache, wrappers, or prompt mu
     "toolResultMaxInFlight",
     "appendSystemContext",
     "prependSystemContext",
-    "prependContext",
     "Silmaril's Firewall found this to be suspicious",
     "Silmaril found a risk of prompt injection",
     "warning prepended",
