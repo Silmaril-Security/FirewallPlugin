@@ -23,13 +23,15 @@
         "maximum": 10000,
         "default": 2500
       },
+      "mode": {
+        "type": "string",
+        "enum": ["shadow", "warn", "block"]
+      },
       "shadowMode": {
-        "type": "boolean",
-        "default": true
+        "type": "boolean"
       },
       "blockMalicious": {
-        "type": "boolean",
-        "default": false
+        "type": "boolean"
       }
     }
   },
@@ -39,7 +41,8 @@
     "apiUrl": { "label": "API URL" },
     "endpointId": { "label": "Endpoint ID", "advanced": true },
     "timeoutMs": { "label": "Classification timeout (ms)", "advanced": true },
-    "shadowMode": { "label": "Shadow mode", "advanced": true },
-    "blockMalicious": { "label": "Block malicious content at supported boundaries", "advanced": true }
+    "mode": { "label": "Mode override", "advanced": true },
+    "shadowMode": { "label": "Legacy shadow mode", "advanced": true },
+    "blockMalicious": { "label": "Legacy block malicious", "advanced": true }
   }
 }

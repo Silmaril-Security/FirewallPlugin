@@ -23,13 +23,13 @@ export type LocalHook =
   | "llm_output"
   | "subagent"
   | "unknown";
-export type LocalMode = "block" | "shadow";
-export type LocalPolicyDecision = "allow" | "monitor" | "block" | "unavailable";
+export type LocalMode = "block" | "warn" | "shadow";
+export type LocalPolicyDecision = "allow" | "monitor" | "warn" | "block" | "unavailable";
 export type LocalNativeAction =
   | "none"
   | "allowed"
   | "block_returned"
-  | "content_replaced"
+  | "warning_context_returned"
   | "failed"
   | "unavailable";
 
@@ -52,6 +52,8 @@ export type LocalProtectionEventInput = {
   classification: ClassificationLike;
   policyDecision: LocalPolicyDecision;
   nativeAction: LocalNativeAction;
+  warnDelivery?: "delivered" | "unsupported";
+  blockUnavailable?: boolean;
   producer: string;
   producerVersion: string;
   pluginVersion: string;
@@ -79,6 +81,8 @@ export type LocalProtectionEventV1 = {
   modelThreshold?: number;
   policyDecision: LocalPolicyDecision;
   nativeAction: LocalNativeAction;
+  warnDelivery?: "delivered" | "unsupported";
+  blockUnavailable?: boolean;
   outcome: "not_observed";
   evidenceTruth: "plugin_reported" | "native_response_returned";
   evidenceCompleteness: "partial";
@@ -164,9 +168,10 @@ export function buildLocalProtectionEvent(
     modelThreshold,
     policyDecision: input.policyDecision,
     nativeAction: input.nativeAction,
+    warnDelivery: input.warnDelivery,
+    blockUnavailable: input.blockUnavailable,
     outcome: "not_observed" as const,
     evidenceTruth: input.nativeAction === "block_returned"
-        || input.nativeAction === "content_replaced"
       ? "native_response_returned" as const
       : "plugin_reported" as const,
     evidenceCompleteness: "partial" as const,

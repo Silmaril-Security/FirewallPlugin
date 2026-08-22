@@ -4,15 +4,12 @@ Silmaril classification and native blocked-decision visibility for OpenClaw
 plugin hooks.
 
 The plugin observes OpenClaw agent, tool, message, delivery, and subagent
-lifecycle payloads, sends them to a Silmaril classify endpoint, and renders
-blocked decisions as readable text or native `MessagePresentation` payloads
-where OpenClaw supports them. Runtime behavior is fail-open: classifier errors
-are logged, then OpenClaw execution continues. Optional enforcement applies at
-every boundary this external plugin can control: `before_agent_run` stops unsafe
-model submissions, `before_tool_call` blocks pending tool calls,
-`message_sending` cancels malicious outbound assistant messages, and
-`reply_payload_sending` replaces unsafe delivery payloads with a safe status
-notice. It requires both `shadowMode: false` and `blockMalicious: true`.
+lifecycle payloads and sends them to Silmaril Firewall. Shadow is silent. Warn
+adds one bounded content-free warning at `before_prompt_build`. Block uses
+OpenClaw-native block or cancel responses at enforceable boundaries and never
+replaces content or delivery payloads. Unsupported boundaries remain unchanged
+and record `block_unavailable`. Classifier failures fail open without adding
+agent-visible context.
 
 The plugin requires OpenClaw plugin API `2026.5.28` or newer and is tested with
 OpenClaw `2026.7.1-2`. Its manifest declares startup activation for hook
@@ -28,8 +25,8 @@ capability loading, and the runtime entry registers typed Gateway hooks with
 | `before_tool_call` | `TOOL_CALL` | Tool parameters; can return `{ "block": true, "blockReason": "..." }` when enforcement is explicitly enabled |
 | `after_tool_call` | `TOOL_RESPONSE` | Tool result text immediately after execution, including child-agent tool calls |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context; observe-only because external OpenClaw plugins cannot replace tool results |
-| `message_sending` | `LLM_OUTPUT` | Final outbound assistant message text; can return `{ "cancel": true, "content": "..." }` with a safe replacement summary when enforcement is explicitly enabled |
-| `reply_payload_sending` | `LLM_OUTPUT` | Normalized delivery payload; can replace unsafe payloads with readable text plus native `MessagePresentation` |
+| `message_sending` | `LLM_OUTPUT` | Final outbound assistant message text; Block can return `{ "cancel": true }` without replacement content |
+| `reply_payload_sending` | `LLM_OUTPUT` | Normalized delivery payload; Block can cancel it without replacement content |
 | `message_sent` | n/a | Logs content-free delivery telemetry; does not reclassify delivered content |
 | `subagent_delivery_target` | `USER_INPUT` | Subagent delivery routing payload; observe-only compatibility hook |
 | `subagent_spawned` | `USER_INPUT` | Subagent spawn lifecycle payload; observe-only in OpenClaw |
@@ -39,7 +36,7 @@ Hook registration is unconditional, so OpenClaw can discover and invoke the
 Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
-Enforceable hooks await Silmaril SDK 0.5.0 with a plugin-owned timeout.
+Enforceable hooks await Silmaril SDK 0.6.0 with a plugin-owned timeout.
 `tool_result_persist` and subagent lifecycle hooks classify for visibility but
 do not claim to block because OpenClaw exposes them as observer or compatibility
 surfaces. `message_sending` and `reply_payload_sending` share a short-lived,
@@ -114,12 +111,16 @@ request.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance`; without an endpoint ID the plugin continues with harness-only provenance.
 
-`shadowMode` defaults to `true` and preserves pass-through behavior. To enable
-blocking at every supported boundary, set both `shadowMode: false` and
-`blockMalicious: true`. Blocking uses OpenClaw's documented native decision
-shapes for agent prompts, tool calls, assistant messages, and delivery payload
-replacement. The external plugin cannot retroactively block or replace persisted
-tool results, and OpenClaw's `subagent_spawned`, `subagent_ended`, and
+Omit `mode` to use the backend-configured mode, or set it to `shadow`, `warn`,
+or `block` for a pilot override. Existing configurations keep their legacy
+behavior: `shadowMode: true` is Shadow, and `shadowMode: false` blocks only when
+`blockMalicious: true`; otherwise it remains observe-only. Blocking uses
+OpenClaw's documented native decision shapes. During a rolling backend upgrade,
+an explicit override remains authoritative and a mode-less legacy response
+preserves the plugin's observe-only default instead of escalating to Block.
+The external plugin cannot
+retroactively block or replace persisted tool results, and OpenClaw's
+`subagent_spawned`, `subagent_ended`, and
 `subagent_delivery_target` hooks are observer or routing hooks. Child-agent tool
 calls and tool results still pass through `before_tool_call`/`after_tool_call`
 inside the child execution path and are scanned there.
