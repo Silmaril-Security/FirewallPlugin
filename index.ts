@@ -668,7 +668,9 @@ function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | 
 }
 
 function effectiveMode(config: RuntimeConfig, result: BlockResult | undefined): FirewallMode {
-  return readMode(result?.mode) ?? config.mode ?? "shadow";
+  // A configured mode is the per-request override. Keep it authoritative if a
+  // legacy or mixed-version backend omits or disagrees about the response mode.
+  return config.mode ?? readMode(result?.mode) ?? "shadow";
 }
 
 function emitOpenClawLocalEvidence(

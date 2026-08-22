@@ -71,7 +71,8 @@ await build({
                 const result = handler
                   ? await handler(text, options)
                   : { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
-                return { ...result, mode: result.mode ?? this.options.mode ?? "shadow" };
+                const mode = this.options.mode ?? result.mode;
+                return mode === undefined ? { ...result } : { ...result, mode };
               }
             }
           `,
@@ -956,6 +957,13 @@ test("decision: only an exact MALICIOUS prediction blocks", () => {
     threshold: 0.5,
     primaryOutcome: "control_abuse",
   }), false);
+  assert.equal(t.effectiveMode({ ...config, mode: "shadow" }, {
+    prediction: "MALICIOUS",
+    mode: "block",
+  }), "shadow");
+  assert.equal(t.effectiveMode({ ...config, mode: undefined }, {
+    prediction: "MALICIOUS",
+  }), "shadow");
 });
 
 test("extractContentText handles deep and cyclic content safely", () => {

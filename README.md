@@ -115,7 +115,10 @@ Omit `mode` to use the backend-configured mode, or set it to `shadow`, `warn`,
 or `block` for a pilot override. Existing configurations keep their legacy
 behavior: `shadowMode: true` is Shadow, and `shadowMode: false` blocks only when
 `blockMalicious: true`; otherwise it remains observe-only. Blocking uses
-OpenClaw's documented native decision shapes. The external plugin cannot
+OpenClaw's documented native decision shapes. During a rolling backend upgrade,
+an explicit override remains authoritative and a mode-less legacy response
+preserves the plugin's observe-only default instead of escalating to Block.
+The external plugin cannot
 retroactively block or replace persisted tool results, and OpenClaw's
 `subagent_spawned`, `subagent_ended`, and
 `subagent_delivery_target` hooks are observer or routing hooks. Child-agent tool
