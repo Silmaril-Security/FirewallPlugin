@@ -275,7 +275,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.0",
+      version: "1.2.1",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -313,7 +313,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.version, "1.2.0");
+  assert.equal(packageJson.version, "1.2.1");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
@@ -532,6 +532,13 @@ test("delivery and lifecycle extraction covers native OpenClaw payload shapes", 
   assert.equal(t.extractLifecycleText({ goal: "scan child prompt", traceId: "secret-trace" }), "scan child prompt");
   assert.equal(t.extractLifecycleText({ child: { id: "child-1", goal: "scan nested child prompt" } }), "scan nested child prompt");
   assert.equal(t.extractLifecycleText({ child: { id: "child-1" }, traceId: "secret-trace" }), "");
+  assert.equal(t.extractLifecycleText({
+    childSummary: "current child summary",
+    messages: [{ role: "user", content: "historical prompt" }],
+    payload: { messages: [{ role: "assistant", content: "historical output" }] },
+  }), "current child summary");
+  assert.equal(t.extractAgentRunText({ prompt: "current prompt", messages: ["historical prompt"] }), "current prompt");
+  assert.equal(t.extractAgentRunText({ messages: ["historical prompt"] }), "");
 });
 
 test("safeStringify handles circular references, BigInt, undefined, and throwing toJSON", () => {
@@ -1214,8 +1221,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.0",
-    pluginVersion: "1.2.0",
+    producerVersion: "1.2.1",
+    pluginVersion: "1.2.1",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1245,7 +1252,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.0");
+  assert.equal(event.provenance.pluginVersion, "1.2.1");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1284,8 +1291,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.0",
-      pluginVersion: "1.2.0",
+      producerVersion: "1.2.1",
+      pluginVersion: "1.2.1",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1315,8 +1322,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.0",
-    pluginVersion: "1.2.0",
+    producerVersion: "1.2.1",
+    pluginVersion: "1.2.1",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);

@@ -111,6 +111,8 @@ request.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance`; without an endpoint ID the plugin continues with harness-only provenance.
 
+Each native OpenClaw event produces at most one classification. The plugin classifies only current event fields and ignores transcript-like `messages` or generic history payloads; conversation state is owned by the Firewall sequence cache.
+
 Omit `mode` to use the backend-configured mode, or set it to `shadow`, `warn`,
 or `block` for a pilot override. Existing configurations keep their legacy
 behavior: `shadowMode: true` is Shadow, and `shadowMode: false` blocks only when
