@@ -224,7 +224,7 @@ function omitUndefined(record) {
 
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
-var PLUGIN_VERSION = "1.2.0";
+var PLUGIN_VERSION = "1.2.1";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 var MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -1077,8 +1077,6 @@ function extractLifecycleText(event) {
   };
   addRecordFields(record);
   addRecordFields(readRecord(record.child));
-  add(record.payload);
-  add(record.messages);
   add(record.presentation);
   return parts.join("\n");
 }
@@ -1088,11 +1086,7 @@ function extractAgentRunText(event) {
   if (prompt) {
     return prompt;
   }
-  const messages = extractContentText(record?.messages);
-  if (messages.trim()) {
-    return messages;
-  }
-  return safeStringify(record?.messages ?? record?.prompt ?? record ?? {});
+  return "";
 }
 var __testInternals = {
   resolveRuntimeConfig,
