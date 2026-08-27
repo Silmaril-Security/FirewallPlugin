@@ -275,7 +275,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.2",
+      version: "1.2.3",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -313,7 +313,8 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("NOTICE"));
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
-  assert.equal(packageJson.version, "1.2.2");
+  assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
+  assert.equal(packageJson.version, "1.2.3");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
@@ -1222,8 +1223,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.2",
-    pluginVersion: "1.2.2",
+    producerVersion: "1.2.3",
+    pluginVersion: "1.2.3",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1253,7 +1254,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.2");
+  assert.equal(event.provenance.pluginVersion, "1.2.3");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1292,8 +1293,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.2",
-      pluginVersion: "1.2.2",
+      producerVersion: "1.2.3",
+      pluginVersion: "1.2.3",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1323,8 +1324,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.2",
-    pluginVersion: "1.2.2",
+    producerVersion: "1.2.3",
+    pluginVersion: "1.2.3",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);

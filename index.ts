@@ -14,7 +14,7 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.2.2";
+const PLUGIN_VERSION = "1.2.3";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;

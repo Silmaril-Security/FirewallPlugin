@@ -161,7 +161,7 @@ response is not represented as independently verified prevention.
 Install the published package by name:
 
 ```sh
-openclaw plugins install @silmaril/firewall-plugin@1.2.2
+openclaw plugins install @silmaril-security/firewall-plugin@1.2.3
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
@@ -205,7 +205,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-firewall-plugin-1.2.2.tgz
+openclaw plugins install ./silmaril-security-firewall-plugin-1.2.3.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
