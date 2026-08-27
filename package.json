@@ -1,6 +1,6 @@
 {
   "name": "@silmaril/firewall-plugin",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -38,5 +38,9 @@
       "openclawVersion": "2026.5.28",
       "pluginSdkVersion": "2026.5.28"
     }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
