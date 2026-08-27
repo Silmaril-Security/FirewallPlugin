@@ -37,9 +37,11 @@ Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
 Enforceable hooks await Silmaril SDK 0.6.0 with a plugin-owned timeout.
-`tool_result_persist` and subagent lifecycle hooks classify for visibility but
-do not claim to block because OpenClaw exposes them as observer or compatibility
-surfaces. `message_sending` and `reply_payload_sending` share a short-lived,
+`after_tool_call`, `tool_result_persist`, and subagent lifecycle hooks classify
+for visibility but do not claim to block because OpenClaw exposes asynchronous
+observation separately from its synchronous result-transform hook. Malicious
+Block-mode events at these boundaries record native action `unavailable` and
+`block_unavailable=true`. `message_sending` and `reply_payload_sending` share a short-lived,
 content-sensitive result so duplicate callbacks make one SDK request; changed
 content is classified separately. Image-only and other empty payloads are
 skipped. Only `prediction === "MALICIOUS"` is enforceable. User-visible and

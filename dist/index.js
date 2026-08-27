@@ -224,7 +224,7 @@ function omitUndefined(record) {
 
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
-var PLUGIN_VERSION = "1.2.1";
+var PLUGIN_VERSION = "1.2.2";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 var MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -733,6 +733,7 @@ function emitOpenClawLocalEvidence(meta, rawText, result, config, nativeAction, 
   }
   const mode = effectiveMode(config, result);
   const malicious = result.prediction === "MALICIOUS";
+  const resolvedNativeAction = malicious && mode === "block" && !enforceableBoundary ? "unavailable" : nativeAction;
   emitLocalProtectionEventBestEffort({
     host: "openClaw",
     hook: localHook(meta),
@@ -743,7 +744,7 @@ function emitOpenClawLocalEvidence(meta, rawText, result, config, nativeAction, 
     toolName: meta.toolName,
     classification: result,
     policyDecision: malicious ? mode === "block" && enforceableBoundary ? "block" : mode === "warn" && warnDelivery === "delivered" ? "warn" : "monitor" : "allow",
-    nativeAction,
+    nativeAction: resolvedNativeAction,
     ...malicious && mode === "warn" ? { warnDelivery: warnDelivery ?? "unsupported" } : {},
     ...malicious && mode === "block" && !enforceableBoundary ? { blockUnavailable: true } : {},
     producer: PLUGIN_ID,
