@@ -315,6 +315,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.version, "1.2.2");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
+  assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
   assert.equal(packageJson.openclaw.build.openclawVersion, "2026.5.28");

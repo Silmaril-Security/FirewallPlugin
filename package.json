@@ -38,5 +38,9 @@
       "openclawVersion": "2026.5.28",
       "pluginSdkVersion": "2026.5.28"
     }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
