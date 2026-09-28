@@ -59,6 +59,7 @@ thresholds, detector maps, metadata dumps, or the original sensitive payload.
 | `package.json` | Package metadata, dependency list, and OpenClaw extension metadata |
 | `scripts/build.mjs` | Builds `dist/index.js` for CLI plugin installation |
 | `scripts/mock-silmaril-classifier.mjs` | Local classifier stub for manual smoke testing |
+| `scripts/check-agent-model-capture.mjs` | Checks a recorded classifier capture for in-flight `agent_model_id` attribution |
 | `scripts/open-playground.mjs` | Opens or prints the public Silmaril Firewall demo URL |
 | `dist/index.js` | Built plugin entrypoint used by OpenClaw's CLI install path |
 
@@ -320,7 +321,23 @@ firewall-plugin: installed
 
 The mock classifier writes captured requests to the path printed on startup.
 Those captures should show the hook label, tool name when available, and the
-classified text length.
+classified text length. The summary also includes `eventType`, `runId`, and
+`agentModelId` when the POST body has `metadata.silmaril.agent_model_id`.
+
+`test/e2e-test-spec.md` describes the disposable-Gateway procedure that records
+these POSTs across two tool-using turns and checks them with:
+
+```sh
+node scripts/check-agent-model-capture.mjs \
+  --capture <captures.jsonl> \
+  --first-model <first-host-model> \
+  --second-model <second-host-model>
+```
+
+The checker expects the first run's early prompt to omit
+`metadata.silmaril.agent_model_id`, the in-flight tool call to carry the first
+host model, and the next run's early prompt to omit it again before that run's
+tool call carries the second host model.
 
 ## License
 

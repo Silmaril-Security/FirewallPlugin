@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -84,6 +85,7 @@ await build({
 
 const moduleUrl = `${pathToFileURL(outFile).href}?${Date.now()}`;
 const mod = await import(moduleUrl);
+const captureChecker = await import(`${pathToFileURL(path.join(repoRoot, "scripts", "check-agent-model-capture.mjs")).href}?${Date.now()}`);
 const plugin = mod.default;
 const t = mod.__testInternals;
 const tests = [];
@@ -848,6 +850,176 @@ test("metadata: plugin-owned agent_model_id replaces a caller-supplied value", (
     silmaril: { agent_model_id: "spoofed-model" },
   });
   assert.equal(Object.hasOwn(omitted.silmaril, "agent_model_id"), false);
+});
+
+function captureRecord(eventType, runId, agentModelId, extra = {}) {
+  const silmaril = {
+    integration: "firewall-plugin",
+    version: "1.2.3",
+    provenance: { schema_version: 1, harness: "openclaw" },
+    ...extra.silmaril,
+  };
+  if (agentModelId !== undefined) {
+    silmaril.agent_model_id = agentModelId;
+  }
+  return {
+    method: "POST",
+    url: "/classify",
+    body: {
+      text: extra.text ?? `${eventType}:${runId ?? "none"}`,
+      hook: extra.hook ?? "TOOL_CALL",
+      metadata: {
+        eventType,
+        runId,
+        sessionId: extra.sessionId ?? "session-a",
+        silmaril,
+      },
+    },
+  };
+}
+
+function twoRunCapture() {
+  return [
+    captureRecord("before_agent_run", "run-1", undefined, { hook: "USER_INPUT", text: "early prompt" }),
+    captureRecord("before_tool_call", "run-1", "gpt-5.4", { text: "tool a" }),
+    captureRecord("after_tool_call", "run-1", "gpt-5.4", { hook: "TOOL_RESPONSE", text: "tool result" }),
+    captureRecord("message_sending", undefined, undefined, { hook: "LLM_OUTPUT", text: "final", sessionId: "session-a" }),
+    captureRecord("before_agent_run", "run-2", undefined, { hook: "USER_INPUT", text: "next prompt" }),
+    captureRecord("before_tool_call", "run-2", "claude-sonnet-4-6", { text: "tool b" }),
+  ];
+}
+
+test("agent model capture checker accepts a switch and unknown early prompts", () => {
+  const result = captureChecker.checkAgentModelCapture(twoRunCapture(), {
+    firstModel: "gpt-5.4",
+    secondModel: "claude-sonnet-4-6",
+  });
+  assert.equal(result.ok, true, result.errors.join("\n"));
+  assert.deepEqual(result.observed.qualifyingRuns, [
+    { runId: "run-1", models: ["gpt-5.4"] },
+    { runId: "run-2", models: ["claude-sonnet-4-6"] },
+  ]);
+});
+
+test("agent model capture checker accepts an in-run model switch", () => {
+  const records = [
+    captureRecord("before_prompt_build", "run-1", undefined, { hook: "USER_INPUT", text: "early" }),
+    captureRecord("before_tool_call", "run-1", "gpt-5.4", { text: "tool a" }),
+    captureRecord("before_tool_call", "run-1", "claude-sonnet-4-6", { text: "tool b" }),
+  ];
+  const result = captureChecker.checkAgentModelCapture(records, {
+    firstModel: "gpt-5.4",
+    secondModel: "claude-sonnet-4-6",
+  });
+  assert.equal(result.ok, true, result.errors.join("\n"));
+});
+
+test("agent model capture checker rejects early attribution, leakage, and a missing clear", () => {
+  const early = twoRunCapture();
+  early[0] = captureRecord("before_agent_run", "run-1", "gpt-5.4", { hook: "USER_INPUT", text: "early prompt" });
+  assert.equal(captureChecker.checkAgentModelCapture(early, {
+    firstModel: "gpt-5.4",
+    secondModel: "claude-sonnet-4-6",
+  }).ok, false);
+
+  const leaked = twoRunCapture();
+  leaked[4] = captureRecord("before_agent_run", "run-2", "gpt-5.4", { hook: "USER_INPUT", text: "next prompt" });
+  assert.equal(captureChecker.checkAgentModelCapture(leaked, {
+    firstModel: "gpt-5.4",
+    secondModel: "claude-sonnet-4-6",
+  }).ok, false);
+
+  const keptResult = captureChecker.checkAgentModelCapture([
+    ...twoRunCapture(),
+    captureRecord("message_sending", "run-1", "gpt-5.4", { hook: "LLM_OUTPUT", text: "late output" }),
+  ], {
+    firstModel: "gpt-5.4",
+    secondModel: "claude-sonnet-4-6",
+  });
+  assert.equal(keptResult.ok, false);
+  assert.ok(keptResult.errors.some((error) => error.includes("message_sending")));
+});
+
+test("agent model capture checker reads a mock classifier recording", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-agent-model-capture-"));
+  const readyPath = path.join(root, "ready.json");
+  const capturePath = path.join(root, "captures.jsonl");
+  const child = spawn(process.execPath, [path.join(repoRoot, "scripts", "mock-silmaril-classifier.mjs")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      SILMARIL_CLASSIFIER_READY_PATH: readyPath,
+      SILMARIL_CLASSIFIER_CAPTURE_PATH: capturePath,
+    },
+    stdio: "ignore",
+  });
+  try {
+    let ready;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const raw = await readFile(readyPath, "utf8").catch(() => "");
+      if (raw) {
+        ready = JSON.parse(raw);
+        break;
+      }
+      await sleep(20);
+    }
+    assert.ok(ready?.url, "mock classifier did not become ready");
+    for (const record of twoRunCapture()) {
+      const response = await fetch(ready.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(record.body),
+      });
+      assert.equal(response.status, 200);
+    }
+    const loaded = await captureChecker.readCapture(capturePath);
+    assert.equal(loaded.errors.length, 0);
+    const result = captureChecker.checkAgentModelCapture(loaded.records, {
+      firstModel: "gpt-5.4",
+      secondModel: "claude-sonnet-4-6",
+    });
+    assert.equal(result.ok, true, result.errors.join("\n"));
+    const summaries = loaded.records.map((record) => record.summary?.agentModelId);
+    assert.deepEqual(summaries, [undefined, "gpt-5.4", "gpt-5.4", undefined, undefined, "claude-sonnet-4-6"]);
+    const checker = spawn(process.execPath, [
+      path.join(repoRoot, "scripts", "check-agent-model-capture.mjs"),
+      "--capture",
+      capturePath,
+      "--first-model",
+      "gpt-5.4",
+      "--second-model",
+      "claude-sonnet-4-6",
+    ], { cwd: repoRoot });
+    const checkerResult = await new Promise((resolve) => {
+      let stdout = "";
+      let stderr = "";
+      checker.stdout.on("data", (chunk) => {
+        stdout += chunk;
+      });
+      checker.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      checker.on("exit", (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(checkerResult.code, 0, checkerResult.stderr);
+    assert.equal(JSON.parse(checkerResult.stdout).ok, true);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => {
+      child.once("exit", resolve);
+      setTimeout(resolve, 1000);
+    });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("gateway acceptance spec states the unexecuted model-call procedure", async () => {
+  const spec = await readFile(path.join(repoRoot, "test", "e2e-test-spec.md"), "utf8");
+  assert.equal(spec.includes("openclaw CLI is not installed"), true);
+  assert.equal(spec.includes("node scripts/check-agent-model-capture.mjs"), true);
+  assert.equal(spec.includes("metadata.silmaril.agent_model_id"), true);
+  assert.equal(spec.includes("model_call_ended"), true);
+  assert.equal(spec.includes("OPENCLAW_STATE_DIR"), true);
 });
 
 test("plugin: gateway_start logs installation only", () => {
