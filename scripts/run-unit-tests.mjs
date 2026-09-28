@@ -301,33 +301,41 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   });
 });
 
-test("mac computer name is plugin-owned classify provenance", async () => {
+test("mac computer name refresh does not block classification", async () => {
+  let resolveLookup;
+  const pending = new Promise((resolve) => {
+    resolveLookup = resolve;
+  });
+  let settled = false;
   const calls = [];
   const now = { value: 1_000 };
-  const command = (invocation) => {
-    calls.push(invocation);
-    return "  Office Mac \n";
-  };
   await withMacDeviceNameLookup({
     platform: "darwin",
     now: () => now.value,
-    command,
+    command: (invocation) => {
+      calls.push(invocation);
+      return pending.then((value) => {
+        settled = true;
+        return value;
+      });
+    },
   }, async () => {
     const endpointId = "2b64e603-f82a-4aec-9524-9736472dc80a";
     await withConsoleCapture(async ({ logs }) => {
-      await t.classifyHookPayload(
+      const cold = await t.classifyHookPayload(
         {
           classify: async (_text, options) => {
-            assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
+            assert.equal(settled, false);
+            assert.equal(options.metadata.silmaril.provenance.device_name, undefined);
             assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
             assert.equal(options.metadata.silmaril.provenance.endpoint_id, undefined);
-            assert.equal(options.metadata.silmaril.provenance.schema_version, 1);
             return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
           },
         },
         "payload",
         makeMeta(),
       );
+      assert.equal(cold.prediction, "BENIGN");
       assert.equal(logs.some((line) => line.includes("Office Mac")), false);
     });
     assert.deepEqual(calls, [{
@@ -336,19 +344,50 @@ test("mac computer name is plugin-owned classify provenance", async () => {
       timeoutMs: 100,
       maxBuffer: 1024,
     }]);
-    const withEndpoint = t.withProvenance({ keep: true }, endpointId);
-    assert.equal(withEndpoint.silmaril.provenance.device_name, "Office Mac");
-    assert.equal(withEndpoint.silmaril.provenance.endpoint_id, endpointId);
+    resolveLookup("  Office Mac \n");
+    await t.flushMacDeviceNameRefreshForTests();
+    const warm = t.withProvenance({
+      silmaril: { provenance: { device_name: "spoofed", harness: "spoofed" } },
+      keep: true,
+    }, endpointId);
+    assert.equal(warm.silmaril.provenance.device_name, "Office Mac");
+    assert.equal(warm.silmaril.provenance.endpoint_id, endpointId);
+    assert.equal(warm.silmaril.provenance.harness, "openclaw");
+    assert.equal(warm.keep, true);
+    assert.equal(calls.length, 1);
+    now.value += 5 * 60 * 1000 - 1;
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("expired computer names refresh in the background and only the new name is used", async () => {
+  const names = ["Old Office Mac\n"];
+  const calls = [];
+  const now = { value: 5_000 };
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    now: () => now.value,
+    command: (invocation) => {
+      calls.push(invocation);
+      return names[0];
+    },
+  }, async () => {
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Old Office Mac");
     assert.equal(calls.length, 1);
     now.value += 5 * 60 * 1000;
-    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    names[0] = "New Office Mac\n";
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
     assert.equal(calls.length, 2);
-    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "New Office Mac");
     assert.equal(calls.length, 2);
   });
 });
 
-test("invalid or missing mac computer names are omitted from provenance", () => {
+test("invalid computer names, including C1 controls, are omitted and retried quickly", async () => {
   const rejected = [
     "",
     " \n\t",
@@ -357,94 +396,52 @@ test("invalid or missing mac computer names are omitted from provenance", () => 
     "bad\u0000name",
     "bad\u001Fname",
     "bad\u007Fname",
+    "Mac\u0080Book",
+    "Mac\u0085Book",
+    "Mac\u009FBook",
     `${" ".repeat(1022)}Mac`,
   ];
   for (const output of rejected) {
-    withMacDeviceNameLookup({
+    await withMacDeviceNameLookup({
       platform: "darwin",
       command: () => output,
-    }, () => {
+    }, async () => {
+      assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
+      await t.flushMacDeviceNameRefreshForTests();
       const provenance = t.withProvenance({}).silmaril.provenance;
       assert.equal(provenance.device_name, undefined, `expected omission for ${JSON.stringify(output)}`);
       assert.equal(provenance.harness, "openclaw");
     });
   }
-  for (const output of ["a".repeat(256), "😀".repeat(128), `${" ".repeat(1021)}Mac`]) {
-    withMacDeviceNameLookup({
+  for (const output of ["a".repeat(256), "😀".repeat(128), "Café Mac", `${" ".repeat(1021)}Mac`]) {
+    await withMacDeviceNameLookup({
       platform: "darwin",
       command: () => output,
-    }, () => {
-      const provenance = t.withProvenance({}).silmaril.provenance;
-      assert.equal(typeof provenance.device_name, "string");
-      assert.equal(provenance.device_name.length <= 256, true);
+    }, async () => {
+      assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
+      await t.flushMacDeviceNameRefreshForTests();
+      const name = t.withProvenance({}).silmaril.provenance.device_name;
+      assert.equal(typeof name, "string");
+      assert.equal(name.length <= 256, true);
+      assert.equal(/[\u0000-\u001F\u007F-\u009F]/.test(name), false);
     });
   }
-  withMacDeviceNameLookup({
+  await withMacDeviceNameLookup({
     platform: "darwin",
     command: () => `${" ".repeat(1021)}Mac`,
-  }, () => {
+  }, async () => {
+    t.withProvenance({});
+    await t.flushMacDeviceNameRefreshForTests();
     assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Mac");
   });
 });
 
-test("spoofed device_name metadata cannot replace the mac computer name", () => {
-  withMacDeviceNameLookup({
-    platform: "darwin",
-    command: () => "Office Mac\n",
-  }, () => {
-    const provenance = t.withProvenance({
-      silmaril: { provenance: { device_name: "spoofed", harness: "spoofed", endpoint_id: "spoofed" }, keep: true },
-      keep: true,
-    }).silmaril;
-    assert.equal(provenance.keep, true);
-    assert.equal(provenance.provenance.device_name, "Office Mac");
-    assert.equal(provenance.provenance.harness, "openclaw");
-    assert.equal(provenance.provenance.endpoint_id, undefined);
-  });
-  withMacDeviceNameLookup({
-    platform: "darwin",
-    command: () => {
-      throw new Error("SECRET-COMPUTER");
-    },
-  }, () => {
-    const provenance = t.withProvenance({
-      silmaril: { provenance: { device_name: "spoofed" } },
-    }).silmaril.provenance;
-    assert.equal(provenance.device_name, undefined);
-    assert.equal(provenance.harness, "openclaw");
-  });
-});
-
-test("non-darwin platforms do not read a mac computer name", async () => {
-  const source = await readFile(path.join(repoRoot, "index.ts"), "utf8");
-  assert.equal(source.includes("hostname"), false);
-  assert.equal(source.includes("LocalHostName"), false);
-  assert.match(source, /execFileSync\(invocation\.file, \[\.\.\.invocation\.args\]/);
-  assert.match(source, /\/usr\/sbin\/scutil/);
-  assert.match(source, /"--get", "ComputerName"/);
-  for (const platform of ["linux", "win32"]) {
-    let calls = 0;
-    withMacDeviceNameLookup({
-      platform,
-      command: () => {
-        calls += 1;
-        return "Office Mac";
-      },
-    }, () => {
-      const provenance = t.withProvenance({
-        silmaril: { provenance: { device_name: "spoofed" } },
-      }).silmaril.provenance;
-      assert.equal(calls, 0);
-      assert.equal(provenance.device_name, undefined);
-      assert.equal(provenance.harness, "openclaw");
-    });
-  }
-});
-
-test("computer name lookup failure still classifies and does not log the name", async () => {
+test("failed computer name lookups retry after five seconds and stay plugin-owned", async () => {
   let calls = 0;
+  const now = { value: 10_000 };
   await withMacDeviceNameLookup({
     platform: "darwin",
+    now: () => now.value,
     command: () => {
       calls += 1;
       throw new Error("SECRET-COMPUTER");
@@ -463,12 +460,51 @@ test("computer name lookup failure still classifies and does not log the name", 
         makeMeta(),
       );
       assert.equal(result.prediction, "BENIGN");
-      const rendered = [...logs, ...errors].join("\n");
-      assert.equal(rendered.includes("SECRET-COMPUTER"), false);
+      assert.equal([...logs, ...errors].join("\n").includes("SECRET-COMPUTER"), false);
     });
-    t.withProvenance({});
+    await t.flushMacDeviceNameRefreshForTests();
+    const spoofed = t.withProvenance({
+      silmaril: { provenance: { device_name: "spoofed" } },
+    }).silmaril.provenance;
+    assert.equal(spoofed.device_name, undefined);
     assert.equal(calls, 1);
+    now.value += 5_000 - 1;
+    t.withProvenance({});
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(calls, 1);
+    now.value += 1;
+    t.withProvenance({});
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(calls, 2);
   });
+});
+
+test("non-darwin platforms do not read a mac computer name", async () => {
+  const source = await readFile(path.join(repoRoot, "index.ts"), "utf8");
+  assert.equal(source.includes("hostname"), false);
+  assert.equal(source.includes("LocalHostName"), false);
+  assert.equal(source.includes("execFileSync"), false);
+  assert.match(source, /execFile\(invocation\.file, \[\.\.\.invocation\.args\]/);
+  assert.match(source, /\/usr\/sbin\/scutil/);
+  assert.match(source, /"--get", "ComputerName"/);
+  for (const platform of ["linux", "win32"]) {
+    let calls = 0;
+    await withMacDeviceNameLookup({
+      platform,
+      command: () => {
+        calls += 1;
+        return "Office Mac";
+      },
+    }, async () => {
+      const provenance = t.withProvenance({
+        silmaril: { provenance: { device_name: "spoofed" } },
+      }).silmaril.provenance;
+      await t.flushMacDeviceNameRefreshForTests();
+      assert.equal(calls, 0);
+      assert.equal(provenance.device_name, undefined);
+      assert.equal(provenance.harness, "openclaw");
+    });
+  }
 });
 
 test("config: explicit mode wins and legacy booleans map conservatively", () => {
