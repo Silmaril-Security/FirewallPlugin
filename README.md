@@ -22,6 +22,8 @@ capability loading, and the runtime entry registers typed Gateway hooks with
 |---|---|---|
 | `gateway_start` | n/a | Logs plugin installation when the Gateway starts |
 | `before_agent_run` | `USER_INPUT` | Final agent prompt/message payload before model submission; can return OpenClaw's native block shape with a readable message |
+| `model_call_started` | n/a | Records the host `model` for this session and run. No prompt content and no classification |
+| `model_call_ended` | n/a | Clears that session and run attribution when the same call ends |
 | `before_tool_call` | `TOOL_CALL` | Tool parameters; can return `{ "block": true, "blockReason": "..." }` when enforcement is explicitly enabled |
 | `after_tool_call` | `TOOL_RESPONSE` | Tool result text immediately after execution, including child-agent tool calls |
 | `tool_result_persist` | `TOOL_RESPONSE` | Tool result text being persisted into context; observe-only because external OpenClaw plugins cannot replace tool results |
@@ -113,6 +115,10 @@ request.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance`; without an endpoint ID the plugin continues with harness-only provenance.
 
+A classified event includes `metadata.silmaril.agent_model_id` only while a `model_call_started` record for the same session (`sessionId` or `sessionKey`) and the same `runId` is still in flight. The value is the trimmed host `model` string. A later start for that session and run replaces it, and `model_call_ended` for that call removes it. Early prompts, blocked runs that never start a model call, events after the call ends, and events that do not share both the session and the run omit the field. The plugin does not copy `ctx.modelId`, a provider name, another session or run, or the classifier model id.
+
+OpenClaw does not wait for `model_call_started` or `model_call_ended`, and current outbound delivery hooks do not include `runId`. A classification that races ahead of the start handler, plus `message_sending`, `message_sent`, and `tool_result_persist` when the host omits the run id, stays unattributed. Session key alone is not enough, because concurrent turns in one session share it.
+
 Each native OpenClaw event produces at most one classification. The plugin classifies only current event fields and ignores transcript-like `messages` or generic history payloads; conversation state is owned by the Firewall sequence cache.
 
 Omit `mode` to use the backend-configured mode, or set it to `shadow`, `warn`,
@@ -130,7 +136,8 @@ calls and tool results still pass through `before_tool_call`/`after_tool_call`
 inside the child execution path and are scanned there.
 
 By default the plugin is pass-through only. Apart from the bounded outbound
-delivery deduplication window, it does not cache classifier results, add
+delivery deduplication window and the bounded in-flight model attribution for
+the current session and run, it does not cache classifier results, add
 prompt/system/developer context, or register wrapper tools.
 
 Configuration precedence is intentionally OpenClaw-native: hook execution reads

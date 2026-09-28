@@ -17,6 +17,8 @@ Shape: hook-only
 Typed hooks:
 gateway_start
 before_agent_run
+model_call_started
+model_call_ended
 before_tool_call
 tool_result_persist
 message_sending

@@ -51,6 +51,9 @@ Runtime behavior:
 - `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
   startup hooks
 - `before_agent_run` sends agent run text as `USER_INPUT`
+- `model_call_started` records the host model for that session and run and does not classify
+- `model_call_ended` clears that in-flight attribution for the ended call
+- classified requests include `metadata.silmaril.agent_model_id` only when the event shares that session and run; otherwise the field is omitted
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
 - `before_tool_call` can return `{ block: true, blockReason }` only when
   `shadowMode=false` and `blockMalicious=true`
@@ -248,6 +251,8 @@ for direct source loading or the CLI install path is unavailable.
    Typed hooks:
    gateway_start
    before_agent_run
+   model_call_started
+   model_call_ended
    before_tool_call
    after_tool_call
    tool_result_persist

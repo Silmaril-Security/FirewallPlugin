@@ -584,6 +584,8 @@ test("plugin: registers startup and classifier hooks", () => {
     "gateway_start",
     "message_sending",
     "message_sent",
+    "model_call_ended",
+    "model_call_started",
     "reply_payload_sending",
     "subagent_delivery_target",
     "subagent_ended",
@@ -593,6 +595,259 @@ test("plugin: registers startup and classifier hooks", () => {
   for (const entry of env.hooks.values()) {
     assert.deepEqual(entry.options, { priority: 0, timeoutMs: 777 });
   }
+});
+
+function agentModelIdOf(call = globalThis.__silmarilFirewallCalls.at(-1)) {
+  return call?.options.metadata.silmaril.agent_model_id;
+}
+
+function startModelCall(env, event, ctx = {}) {
+  hook(env, "model_call_started")(event, ctx);
+}
+
+function endModelCall(env, event, ctx = {}) {
+  hook(env, "model_call_ended")(event, ctx);
+}
+
+async function classifyTool(env, event, ctx = {}) {
+  await withSilencedConsole(async () => {
+    await hook(env, "before_tool_call")({
+      toolName: "exec",
+      toolCallId: `tool-${globalThis.__silmarilFirewallCalls.length}`,
+      params: { cmd: "pwd", n: globalThis.__silmarilFirewallCalls.length },
+      ...event,
+    }, ctx);
+  });
+}
+
+test("agent model: direct host model is copied for the same in-flight session and run", async () => {
+  const env = registerPlugin();
+  startModelCall(env, {
+    runId: "run-1",
+    callId: "run-1:model:1",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+    provider: "openai",
+    model: " claude-sonnet-4.6 ",
+  }, {
+    modelId: "provider-default",
+    modelProviderId: "openai",
+  });
+  assert.equal(globalThis.__silmarilFirewallCalls.length, 0);
+  await classifyTool(env, {
+    runId: "run-1",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+  });
+  assert.equal(agentModelIdOf(), "claude-sonnet-4.6");
+  assert.equal(globalThis.__silmarilFirewallCalls[0].options.metadata.silmaril.provenance.harness, "openclaw");
+});
+
+test("agent model: a later call switches attribution and the previous end does not clear it", async () => {
+  const env = registerPlugin();
+  startModelCall(env, {
+    runId: "run-1",
+    callId: "run-1:model:1",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+    model: "gpt-5",
+  });
+  await classifyTool(env, { runId: "run-1", sessionId: "session-a", sessionKey: "key-a" });
+  assert.equal(agentModelIdOf(), "gpt-5");
+
+  startModelCall(env, {
+    runId: "run-1",
+    callId: "run-1:model:2",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+    model: "claude-sonnet-4.6",
+  });
+  endModelCall(env, {
+    runId: "run-1",
+    callId: "run-1:model:1",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+    model: "gpt-5",
+    outcome: "completed",
+    durationMs: 10,
+  });
+  await classifyTool(env, { runId: "run-1", sessionId: "session-a", sessionKey: "key-a" });
+  assert.equal(agentModelIdOf(), "claude-sonnet-4.6");
+
+  endModelCall(env, {
+    runId: "run-1",
+    callId: "run-1:model:2",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+    model: "claude-sonnet-4.6",
+    outcome: "completed",
+    durationMs: 12,
+  });
+  await classifyTool(env, { runId: "run-1", sessionId: "session-a", sessionKey: "key-a" });
+  assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+});
+
+test("agent model: missing attribution stays omitted, including early blocked prompts", async () => {
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      blockMalicious: true,
+      shadowMode: false,
+    },
+  });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    primaryOutcome: "control_abuse",
+  });
+
+  await withSilencedConsole(async () => {
+    const blocked = await hook(env, "before_agent_run")({
+      prompt: "block this early prompt",
+      runId: "run-early",
+      sessionId: "session-a",
+    }, {
+      modelId: "provider-default",
+      modelProviderId: "openai",
+    });
+    assert.equal(blocked.outcome, "block");
+    assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls[0].options.metadata.silmaril, "agent_model_id"), false);
+
+    await classifyTool(env, { runId: "run-early", sessionId: "session-a" }, {
+      modelId: "provider-default",
+      modelProviderId: "openai",
+    });
+    assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+
+    startModelCall(env, {
+      runId: "run-early",
+      callId: "run-early:model:1",
+      sessionId: "session-a",
+      provider: "openai",
+      model: "   ",
+    }, { modelId: "provider-default" });
+    await classifyTool(env, { runId: "run-early", sessionId: "session-a" });
+    assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+
+    startModelCall(env, {
+      runId: "run-early",
+      callId: "run-early:model:2",
+      provider: "openai",
+      model: "gpt-5",
+    });
+    await classifyTool(env, { runId: "run-early" });
+    assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+
+    startModelCall(env, {
+      runId: "run-early",
+      callId: "run-early:model:3",
+      sessionId: "session-a",
+      sessionKey: "key-a",
+      model: "gpt-5",
+    });
+    await hook(env, "message_sending")({
+      content: "final assistant text",
+      sessionKey: "key-a",
+    }, {});
+    assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+
+    hook(env, "tool_result_persist")({
+      message: { content: "persisted tool output" },
+      sessionId: "session-a",
+      sessionKey: "key-a",
+    }, {});
+    assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+
+    await hook(env, "message_sending")({
+      content: "same-turn assistant text",
+      runId: "run-early",
+      sessionKey: "key-a",
+    }, {});
+    assert.equal(agentModelIdOf(), "gpt-5");
+  });
+});
+
+test("agent model: sessions and runs do not share attribution", async () => {
+  const env = registerPlugin();
+  startModelCall(env, {
+    runId: "run-shared",
+    callId: "session-a:model:1",
+    sessionId: "session-a",
+    sessionKey: "key-a",
+    model: "model-a",
+  });
+  startModelCall(env, {
+    runId: "run-shared",
+    callId: "session-b:model:1",
+    sessionId: "session-b",
+    sessionKey: "key-b",
+    model: "model-b",
+  });
+  await classifyTool(env, { runId: "run-shared", sessionId: "session-a", sessionKey: "key-a" });
+  assert.equal(agentModelIdOf(), "model-a");
+  await classifyTool(env, { runId: "run-shared", sessionId: "session-b", sessionKey: "key-b" });
+  assert.equal(agentModelIdOf(), "model-b");
+  await classifyTool(env, { runId: "run-other", sessionId: "session-a", sessionKey: "key-a" });
+  assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+  await classifyTool(env, {
+    runId: "run-shared",
+    sessionId: "session-b",
+    sessionKey: "key-a",
+  });
+  assert.equal(Object.hasOwn(globalThis.__silmarilFirewallCalls.at(-1).options.metadata.silmaril, "agent_model_id"), false);
+});
+
+test("agent model: attribution is bounded and expires", () => {
+  const store = t.createAgentModelStore();
+  const started = 1_000;
+  for (let index = 0; index < t.MAX_AGENT_MODEL_ENTRIES; index += 1) {
+    t.rememberAgentModel(store, {
+      runId: "run-bound",
+      callId: `call-${index}`,
+      sessionId: `session-${index}`,
+      model: `model-${index}`,
+    }, {}, started);
+  }
+  assert.equal(
+    t.lookupAgentModelId(store, { runId: "run-bound", sessionId: "session-0" }, started + 1),
+    "model-0",
+  );
+  t.rememberAgentModel(store, {
+    runId: "run-bound",
+    callId: "call-new",
+    sessionId: "session-new",
+    model: "model-new",
+  }, {}, started + 2);
+  assert.equal(
+    t.lookupAgentModelId(store, { runId: "run-bound", sessionId: "session-0" }, started + 3),
+    undefined,
+  );
+  assert.equal(
+    t.lookupAgentModelId(store, { runId: "run-bound", sessionId: "session-new" }, started + 3),
+    "model-new",
+  );
+  assert.equal(
+    t.lookupAgentModelId(
+      store,
+      { runId: "run-bound", sessionId: "session-new" },
+      started + 2 + t.AGENT_MODEL_TTL_MS + 1,
+    ),
+    undefined,
+  );
+});
+
+test("metadata: plugin-owned agent_model_id replaces a caller-supplied value", () => {
+  const metadata = t.withProvenance({
+    silmaril: { agent_model_id: "spoofed-model", provenance: { harness: "spoofed" } },
+  }, undefined, " gpt-5 ");
+  assert.equal(metadata.silmaril.agent_model_id, "gpt-5");
+  assert.equal(metadata.silmaril.provenance.harness, "openclaw");
+  const omitted = t.withProvenance({
+    silmaril: { agent_model_id: "spoofed-model" },
+  });
+  assert.equal(Object.hasOwn(omitted.silmaril, "agent_model_id"), false);
 });
 
 test("plugin: gateway_start logs installation only", () => {
