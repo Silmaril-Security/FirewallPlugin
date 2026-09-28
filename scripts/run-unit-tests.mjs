@@ -355,33 +355,43 @@ test("mac computer name refresh does not block classification", async () => {
     assert.equal(warm.silmaril.provenance.harness, "openclaw");
     assert.equal(warm.keep, true);
     assert.equal(calls.length, 1);
-    now.value += 5 * 60 * 1000 - 1;
+    now.value += t.MAC_DEVICE_NAME_CACHE_TTL_MS - t.MAC_DEVICE_NAME_REFRESH_LEAD_MS - 1;
     assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
     assert.equal(calls.length, 1);
   });
 });
 
-test("expired computer names refresh in the background and only the new name is used", async () => {
-  const names = ["Old Office Mac\n"];
+test("expired computer names stay attached while a nonblocking refresh resolves", async () => {
+  let resolveNext;
+  let settled = false;
   const calls = [];
   const now = { value: 5_000 };
   await withMacDeviceNameLookup({
     platform: "darwin",
     now: () => now.value,
-    command: (invocation) => {
-      calls.push(invocation);
-      return names[0];
+    schedule: () => ({ cancel() {} }),
+    command: () => {
+      calls.push(calls.length + 1);
+      if (calls.length === 1) return "Old Office Mac\n";
+      return new Promise((resolve) => {
+        resolveNext = (value) => {
+          settled = true;
+          resolve(value);
+        };
+      });
     },
   }, async () => {
+    t.startMacDeviceNameLookup();
     assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
     await t.flushMacDeviceNameRefreshForTests();
     assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Old Office Mac");
-    assert.equal(calls.length, 1);
-    now.value += 5 * 60 * 1000;
-    names[0] = "New Office Mac\n";
-    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
+    now.value += t.MAC_DEVICE_NAME_CACHE_TTL_MS;
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Old Office Mac");
+    assert.equal(settled, false);
     assert.equal(calls.length, 2);
+    resolveNext("New Office Mac\n");
     await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(settled, true);
     assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "New Office Mac");
     assert.equal(calls.length, 2);
   });
@@ -477,6 +487,227 @@ test("failed computer name lookups retry after five seconds and stay plugin-owne
     await t.flushMacDeviceNameRefreshForTests();
     assert.equal(calls, 2);
   });
+});
+
+test("plugin registration warms the mac name before a later classification", async () => {
+  const calls = [];
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    schedule: () => ({ cancel() {} }),
+    command: (invocation) => {
+      calls.push(invocation);
+      return "Office Mac\n";
+    },
+  }, async () => {
+    const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u" } });
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, undefined);
+    assert.equal(calls.length, 1);
+    await t.flushMacDeviceNameRefreshForTests();
+    hook(env, "gateway_start")();
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(calls.length, 1);
+    assert.deepEqual(env.logger.infos, ["firewall-plugin: installed"]);
+    const result = await withSilencedConsole(() => t.classifyHookPayload(
+      {
+        classify: async (_text, options) => {
+          assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
+          assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
+          assert.equal(options.metadata.silmaril.provenance.endpoint_id, undefined);
+          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+        },
+      },
+      "payload",
+      makeMeta(),
+    ));
+    assert.equal(result.prediction, "BENIGN");
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("proactive refresh keeps device_name for a classification more than five minutes later", async () => {
+  const names = ["Office Mac\n"];
+  const calls = [];
+  const scheduled = [];
+  const now = { value: 10_000 };
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    now: () => now.value,
+    schedule: (delay, fn) => {
+      const entry = { delay, fn, cancelled: false };
+      scheduled.push(entry);
+      return { cancel() { entry.cancelled = true; } };
+    },
+    command: () => {
+      calls.push(names[0]);
+      return names[0];
+    },
+  }, async () => {
+    t.startMacDeviceNameLookup();
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    const armed = scheduled.filter((entry) => !entry.cancelled);
+    assert.equal(armed.length, 1);
+    assert.equal(armed[0].delay, t.MAC_DEVICE_NAME_CACHE_TTL_MS - t.MAC_DEVICE_NAME_REFRESH_LEAD_MS);
+    names[0] = "Renamed Mac\n";
+    now.value += armed[0].delay;
+    armed[0].fn();
+    await t.flushMacDeviceNameRefreshForTests();
+    now.value += (6 * 60 * 1000) - armed[0].delay;
+    const result = await withSilencedConsole(() => t.classifyHookPayload(
+      {
+        classify: async (_text, options) => {
+          assert.equal(options.metadata.silmaril.provenance.device_name, "Renamed Mac");
+          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+        },
+      },
+      "payload",
+      makeMeta(),
+    ));
+    assert.equal(result.prediction, "BENIGN");
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("a low-frequency classification keeps the last validated name when the refresh timer has not run", async () => {
+  let resolveNext;
+  let settled = false;
+  const calls = [];
+  const now = { value: 80_000 };
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    now: () => now.value,
+    schedule: () => ({ cancel() {} }),
+    command: () => {
+      calls.push(calls.length + 1);
+      if (calls.length === 1) return "Office Mac\n";
+      return new Promise((resolve) => {
+        resolveNext = (value) => {
+          settled = true;
+          resolve(value);
+        };
+      });
+    },
+  }, async () => {
+    t.startMacDeviceNameLookup();
+    await t.flushMacDeviceNameRefreshForTests();
+    now.value += 6 * 60 * 1000;
+    const result = await withSilencedConsole(() => t.classifyHookPayload(
+      {
+        classify: async (_text, options) => {
+          assert.equal(settled, false);
+          assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
+          assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
+          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+        },
+      },
+      "payload",
+      makeMeta(),
+    ));
+    assert.equal(result.prediction, "BENIGN");
+    assert.equal(calls.length, 2);
+    resolveNext("Renamed Mac\n");
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Renamed Mac");
+  });
+});
+
+test("device_name is omitted once the last validation passes the staleness bound", async () => {
+  const calls = [];
+  const now = { value: 1_000 };
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    now: () => now.value,
+    schedule: () => ({ cancel() {} }),
+    command: () => {
+      calls.push(calls.length + 1);
+      if (calls.length === 1) return "Office Mac\n";
+      return new Promise(() => {});
+    },
+  }, async () => {
+    t.startMacDeviceNameLookup();
+    await t.flushMacDeviceNameRefreshForTests();
+    now.value += t.MAC_DEVICE_NAME_CACHE_TTL_MS + t.MAC_DEVICE_NAME_STALE_GRACE_MS;
+    const result = await withSilencedConsole(() => t.classifyHookPayload(
+      {
+        classify: async (_text, options) => {
+          assert.equal(options.metadata.silmaril.provenance.device_name, undefined);
+          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+        },
+      },
+      "payload",
+      makeMeta(),
+    ));
+    assert.equal(result.prediction, "BENIGN");
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("a failed refresh keeps the bounded name and retries without blocking", async () => {
+  let mode = "ok";
+  const calls = [];
+  const scheduled = [];
+  const now = { value: 20_000 };
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    now: () => now.value,
+    schedule: (delay, fn) => {
+      const entry = { delay, fn, cancelled: false };
+      scheduled.push(entry);
+      return { cancel() { entry.cancelled = true; } };
+    },
+    command: () => {
+      calls.push(mode);
+      if (mode === "fail") throw new Error("SECRET-COMPUTER");
+      return mode === "next" ? "Renamed Mac\n" : "Office Mac\n";
+    },
+  }, async () => {
+    t.startMacDeviceNameLookup();
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    mode = "fail";
+    const lead = scheduled.filter((entry) => !entry.cancelled).at(-1);
+    assert.equal(lead.delay, t.MAC_DEVICE_NAME_CACHE_TTL_MS - t.MAC_DEVICE_NAME_REFRESH_LEAD_MS);
+    now.value += lead.delay;
+    lead.fn();
+    await t.flushMacDeviceNameRefreshForTests();
+    await withConsoleCapture(async ({ logs, errors }) => {
+      const result = await t.classifyHookPayload(
+        {
+          classify: async (_text, options) => {
+            assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
+            return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          },
+        },
+        "payload",
+        makeMeta(),
+      );
+      assert.equal(result.prediction, "BENIGN");
+      assert.equal([...logs, ...errors].join("\n").includes("SECRET-COMPUTER"), false);
+    });
+    assert.equal(calls.filter((entry) => entry === "fail").length, 1);
+    const retry = scheduled.filter((entry) => !entry.cancelled).at(-1);
+    assert.equal(retry.delay, t.MAC_DEVICE_NAME_FAILURE_RETRY_MS);
+    now.value += t.MAC_DEVICE_NAME_FAILURE_RETRY_MS - 1;
+    t.withProvenance({});
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(calls.filter((entry) => entry === "fail").length, 1);
+    mode = "next";
+    now.value += 1;
+    t.withProvenance({});
+    await t.flushMacDeviceNameRefreshForTests();
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Renamed Mac");
+    assert.equal(calls.filter((entry) => entry === "next").length, 1);
+  });
+});
+
+test("mac device name refresh timers do not keep the process referenced", () => {
+  let fired = false;
+  const timer = t.defaultMacDeviceNameSchedule(60_000, () => {
+    fired = true;
+  });
+  assert.equal(timer.hasRef(), false);
+  timer.cancel();
+  assert.equal(fired, false);
 });
 
 test("non-darwin platforms do not read a mac computer name", async () => {

@@ -27,6 +27,8 @@ const MAC_DEVICE_NAME_MAX_OUTPUT_BYTES = 1024;
 const MAC_DEVICE_NAME_MAX_UTF16_UNITS = 256;
 const MAC_DEVICE_NAME_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAC_DEVICE_NAME_FAILURE_RETRY_MS = 5 * 1000;
+const MAC_DEVICE_NAME_REFRESH_LEAD_MS = 30 * 1000;
+const MAC_DEVICE_NAME_STALE_GRACE_MS = MAC_DEVICE_NAME_CACHE_TTL_MS;
 const MAC_DEVICE_NAME_FILE = "/usr/sbin/scutil";
 const MAC_DEVICE_NAME_ARGS = ["--get", "ComputerName"] as const;
 const MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
@@ -96,6 +98,7 @@ export default definePluginEntry({
   name: "Firewall Plugin",
   description: "Passes OpenClaw hook payloads to Silmaril and renders readable blocked-decision feedback",
   register(api) {
+    startMacDeviceNameLookup();
     const registrationTimeoutMs = readIntegerInRange(
       readRecord(api.pluginConfig)?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
@@ -142,6 +145,7 @@ export default definePluginEntry({
 
     api.on("gateway_start", () => {
       api.logger.info("firewall-plugin: installed");
+      startMacDeviceNameLookup();
     }, hookOptions);
 
     api.on("before_prompt_build", async (event, ctx) => {
@@ -656,16 +660,31 @@ type MacDeviceNameCommand = (
   invocation: MacDeviceNameCommandInvocation,
 ) => string | Promise<string>;
 
+type MacDeviceNameTimer = {
+  cancel: () => void;
+  hasRef?: () => boolean;
+};
+
+type MacDeviceNameSchedule = (delayMs: number, run: () => void) => MacDeviceNameTimer;
+
 type MacDeviceNameLookupDeps = {
   platform: NodeJS.Platform;
   now: () => number;
   command: MacDeviceNameCommand;
+  schedule: MacDeviceNameSchedule;
 };
 
 type MacDeviceNameLookupOverrides = {
   platform?: NodeJS.Platform;
   now?: () => number;
   command?: MacDeviceNameCommand;
+  schedule?: MacDeviceNameSchedule;
+};
+
+type MacDeviceNameCache = {
+  value: string;
+  expiresAt: number;
+  staleUntil: number;
 };
 
 function defaultMacDeviceNameCommand(invocation: MacDeviceNameCommandInvocation): Promise<string> {
@@ -696,29 +715,56 @@ function normalizeMacDeviceName(output: string, maxOutputBytes: number): string 
   return name;
 }
 
+let macDeviceNameShutdownHook = false;
+
+function defaultMacDeviceNameSchedule(delayMs: number, run: () => void): MacDeviceNameTimer {
+  if (!macDeviceNameShutdownHook) {
+    macDeviceNameShutdownHook = true;
+    process.once("beforeExit", () => {
+      cancelMacDeviceNameTimer();
+    });
+  }
+  const timer = setTimeout(run, delayMs);
+  timer.unref();
+  return {
+    cancel: () => clearTimeout(timer),
+    hasRef: () => timer.hasRef(),
+  };
+}
+
 const defaultMacDeviceNameDeps: MacDeviceNameLookupDeps = {
   platform: process.platform,
   now: () => performance.now(),
   command: defaultMacDeviceNameCommand,
+  schedule: defaultMacDeviceNameSchedule,
 };
 
 let macDeviceNameDeps: MacDeviceNameLookupDeps = {
   platform: defaultMacDeviceNameDeps.platform,
   now: defaultMacDeviceNameDeps.now,
   command: defaultMacDeviceNameDeps.command,
+  schedule: defaultMacDeviceNameDeps.schedule,
 };
 
-let macDeviceNameCache: { value: string; expiresAt: number } | undefined;
+let macDeviceNameCache: MacDeviceNameCache | undefined;
 let macDeviceNameRetryAt: number | undefined;
 let macDeviceNameRefresh: Promise<void> | undefined;
+let macDeviceNameTimer: MacDeviceNameTimer | undefined;
 let macDeviceNameGeneration = 0;
 
+function cancelMacDeviceNameTimer(): void {
+  macDeviceNameTimer?.cancel();
+  macDeviceNameTimer = undefined;
+}
+
 function setMacDeviceNameLookupForTests(overrides: MacDeviceNameLookupOverrides = {}): void {
+  cancelMacDeviceNameTimer();
   macDeviceNameGeneration += 1;
   macDeviceNameDeps = {
     platform: overrides.platform ?? process.platform,
     now: overrides.now ?? (() => performance.now()),
     command: overrides.command ?? defaultMacDeviceNameCommand,
+    schedule: overrides.schedule ?? defaultMacDeviceNameSchedule,
   };
   macDeviceNameCache = undefined;
   macDeviceNameRetryAt = undefined;
@@ -729,23 +775,75 @@ function flushMacDeviceNameRefreshForTests(): Promise<void> {
   return macDeviceNameRefresh ?? Promise.resolve();
 }
 
-// Classification never waits on scutil. A cold cache omits device_name and
-// refreshes in the background. Only an unexpired validated name is attached.
-// Failed and unusable lookups retry after a short interval, not the success TTL.
+function macDeviceNameRetryWaiting(now: number): boolean {
+  return macDeviceNameRetryAt !== undefined && now < macDeviceNameRetryAt;
+}
+
+// Classification never waits on scutil. Registration starts the lookup on macOS.
+// A fresh validated name is kept for five minutes and refreshed thirty seconds
+// before expiry, using an unref'd timer so an idle gateway can exit. Until ten
+// minutes after the last success, a refresh in flight still attaches that name.
+// The first event before any success may omit it. Failures stay nonfatal and
+// retry after five seconds while a bounded name remains; they do not poll forever.
 function readMacDeviceName(): string | undefined {
   if (macDeviceNameDeps.platform !== "darwin") {
     return undefined;
   }
   const now = macDeviceNameDeps.now();
-  const cached = macDeviceNameCache && now < macDeviceNameCache.expiresAt
-    ? macDeviceNameCache.value
-    : undefined;
-  const refreshDue = !macDeviceNameCache || now >= macDeviceNameCache.expiresAt;
-  const retryWaiting = macDeviceNameRetryAt !== undefined && now < macDeviceNameRetryAt;
-  if (refreshDue && !retryWaiting) {
+  maintainMacDeviceName(now);
+  const cache = macDeviceNameCache;
+  if (cache && now < cache.staleUntil) return cache.value;
+  return undefined;
+}
+
+function startMacDeviceNameLookup(): void {
+  if (macDeviceNameDeps.platform !== "darwin") return;
+  maintainMacDeviceName(macDeviceNameDeps.now());
+}
+
+function maintainMacDeviceName(now: number): void {
+  const cache = macDeviceNameCache;
+  const refreshDue = !cache || now >= cache.expiresAt - MAC_DEVICE_NAME_REFRESH_LEAD_MS;
+  if (refreshDue && !macDeviceNameRetryWaiting(now)) {
     startMacDeviceNameRefresh();
   }
-  return cached;
+}
+
+function scheduleMacDeviceNameTimer(delayMs: number, generation: number): void {
+  cancelMacDeviceNameTimer();
+  if (generation !== macDeviceNameGeneration) return;
+  if (!(delayMs > 0) || !Number.isFinite(delayMs)) return;
+  const timer = macDeviceNameDeps.schedule(delayMs, () => {
+    if (timer !== macDeviceNameTimer) return;
+    macDeviceNameTimer = undefined;
+    if (generation !== macDeviceNameGeneration) return;
+    const current = macDeviceNameDeps.now();
+    if (macDeviceNameRetryWaiting(current)) {
+      const retryIn = (macDeviceNameRetryAt ?? current) - current;
+      scheduleMacDeviceNameTimer(retryIn, generation);
+      return;
+    }
+    const cached = macDeviceNameCache;
+    if (cached && current < cached.expiresAt - MAC_DEVICE_NAME_REFRESH_LEAD_MS) {
+      scheduleMacDeviceNameTimer(cached.expiresAt - MAC_DEVICE_NAME_REFRESH_LEAD_MS - current, generation);
+      return;
+    }
+    startMacDeviceNameRefresh();
+  });
+  macDeviceNameTimer = timer;
+}
+
+function scheduleMacDeviceNameMaintenance(generation: number): void {
+  if (generation !== macDeviceNameGeneration) return;
+  const now = macDeviceNameDeps.now();
+  const cache = macDeviceNameCache;
+  if (cache && now < cache.expiresAt - MAC_DEVICE_NAME_REFRESH_LEAD_MS) {
+    scheduleMacDeviceNameTimer(cache.expiresAt - MAC_DEVICE_NAME_REFRESH_LEAD_MS - now, generation);
+    return;
+  }
+  if (cache && now < cache.staleUntil && macDeviceNameRetryWaiting(now)) {
+    scheduleMacDeviceNameTimer((macDeviceNameRetryAt ?? now) - now, generation);
+  }
 }
 
 function startMacDeviceNameRefresh(): void {
@@ -778,11 +876,17 @@ async function refreshMacDeviceName(
   if (generation !== macDeviceNameGeneration) return;
   const finished = deps.now();
   if (usable) {
-    macDeviceNameCache = { value: usable, expiresAt: finished + MAC_DEVICE_NAME_CACHE_TTL_MS };
+    macDeviceNameCache = {
+      value: usable,
+      expiresAt: finished + MAC_DEVICE_NAME_CACHE_TTL_MS,
+      staleUntil: finished + MAC_DEVICE_NAME_CACHE_TTL_MS + MAC_DEVICE_NAME_STALE_GRACE_MS,
+    };
     macDeviceNameRetryAt = undefined;
+    scheduleMacDeviceNameMaintenance(generation);
     return;
   }
   macDeviceNameRetryAt = finished + MAC_DEVICE_NAME_FAILURE_RETRY_MS;
+  scheduleMacDeviceNameMaintenance(generation);
 }
 
 function withProvenance(
@@ -1274,6 +1378,12 @@ export const __testInternals = {
   withProvenance,
   setMacDeviceNameLookupForTests,
   flushMacDeviceNameRefreshForTests,
+  startMacDeviceNameLookup,
+  defaultMacDeviceNameSchedule,
+  MAC_DEVICE_NAME_CACHE_TTL_MS,
+  MAC_DEVICE_NAME_FAILURE_RETRY_MS,
+  MAC_DEVICE_NAME_REFRESH_LEAD_MS,
+  MAC_DEVICE_NAME_STALE_GRACE_MS,
   readRecord,
   readString,
   readIntegerInRange,
