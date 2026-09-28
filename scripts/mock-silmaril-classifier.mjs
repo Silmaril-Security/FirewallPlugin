@@ -83,11 +83,19 @@ function summarizeBody(body) {
     return {};
   }
 
+  const silmaril = body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+    ? body.metadata.silmaril
+    : undefined;
   return {
     hook: body.hook,
     toolName: body.tool_name,
     hooks: body.hooks,
     toolNames: body.tool_names,
+    eventType: body.metadata && typeof body.metadata === "object" ? body.metadata.eventType : undefined,
+    runId: body.metadata && typeof body.metadata === "object" ? body.metadata.runId : undefined,
+    agentModelId: silmaril && typeof silmaril === "object" && Object.hasOwn(silmaril, "agent_model_id")
+      ? silmaril.agent_model_id
+      : undefined,
     textLength: typeof body.text === "string" ? body.text.length : undefined,
     textCount: Array.isArray(body.texts) ? body.texts.length : undefined,
   };
