@@ -86,7 +86,26 @@ const moduleUrl = `${pathToFileURL(outFile).href}?${Date.now()}`;
 const mod = await import(moduleUrl);
 const plugin = mod.default;
 const t = mod.__testInternals;
+t.setMacDeviceNameLookupForTests({ platform: "linux" });
 const tests = [];
+
+function withMacDeviceNameLookup(overrides, fn) {
+  t.setMacDeviceNameLookupForTests(overrides);
+  let result;
+  try {
+    result = fn();
+  } catch (error) {
+    t.setMacDeviceNameLookupForTests({ platform: "linux" });
+    throw error;
+  }
+  if (result && typeof result.then === "function") {
+    return result.finally(() => {
+      t.setMacDeviceNameLookupForTests({ platform: "linux" });
+    });
+  }
+  t.setMacDeviceNameLookupForTests({ platform: "linux" });
+  return result;
+}
 
 function test(name, fn) {
   tests.push({ name, fn });
@@ -279,6 +298,176 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
+  });
+});
+
+test("mac computer name is plugin-owned classify provenance", async () => {
+  const calls = [];
+  const now = { value: 1_000 };
+  const command = (invocation) => {
+    calls.push(invocation);
+    return "  Office Mac \n";
+  };
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    now: () => now.value,
+    command,
+  }, async () => {
+    const endpointId = "2b64e603-f82a-4aec-9524-9736472dc80a";
+    await withConsoleCapture(async ({ logs }) => {
+      await t.classifyHookPayload(
+        {
+          classify: async (_text, options) => {
+            assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
+            assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
+            assert.equal(options.metadata.silmaril.provenance.endpoint_id, undefined);
+            assert.equal(options.metadata.silmaril.provenance.schema_version, 1);
+            return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          },
+        },
+        "payload",
+        makeMeta(),
+      );
+      assert.equal(logs.some((line) => line.includes("Office Mac")), false);
+    });
+    assert.deepEqual(calls, [{
+      file: "/usr/sbin/scutil",
+      args: ["--get", "ComputerName"],
+      timeoutMs: 100,
+      maxBuffer: 1024,
+    }]);
+    const withEndpoint = t.withProvenance({ keep: true }, endpointId);
+    assert.equal(withEndpoint.silmaril.provenance.device_name, "Office Mac");
+    assert.equal(withEndpoint.silmaril.provenance.endpoint_id, endpointId);
+    assert.equal(calls.length, 1);
+    now.value += 5 * 60 * 1000;
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    assert.equal(calls.length, 2);
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+    assert.equal(calls.length, 2);
+  });
+});
+
+test("invalid or missing mac computer names are omitted from provenance", () => {
+  const rejected = [
+    "",
+    " \n\t",
+    "a".repeat(257),
+    "😀".repeat(129),
+    "bad\u0000name",
+    "bad\u001Fname",
+    "bad\u007Fname",
+    `${" ".repeat(1022)}Mac`,
+  ];
+  for (const output of rejected) {
+    withMacDeviceNameLookup({
+      platform: "darwin",
+      command: () => output,
+    }, () => {
+      const provenance = t.withProvenance({}).silmaril.provenance;
+      assert.equal(provenance.device_name, undefined, `expected omission for ${JSON.stringify(output)}`);
+      assert.equal(provenance.harness, "openclaw");
+    });
+  }
+  for (const output of ["a".repeat(256), "😀".repeat(128), `${" ".repeat(1021)}Mac`]) {
+    withMacDeviceNameLookup({
+      platform: "darwin",
+      command: () => output,
+    }, () => {
+      const provenance = t.withProvenance({}).silmaril.provenance;
+      assert.equal(typeof provenance.device_name, "string");
+      assert.equal(provenance.device_name.length <= 256, true);
+    });
+  }
+  withMacDeviceNameLookup({
+    platform: "darwin",
+    command: () => `${" ".repeat(1021)}Mac`,
+  }, () => {
+    assert.equal(t.withProvenance({}).silmaril.provenance.device_name, "Mac");
+  });
+});
+
+test("spoofed device_name metadata cannot replace the mac computer name", () => {
+  withMacDeviceNameLookup({
+    platform: "darwin",
+    command: () => "Office Mac\n",
+  }, () => {
+    const provenance = t.withProvenance({
+      silmaril: { provenance: { device_name: "spoofed", harness: "spoofed", endpoint_id: "spoofed" }, keep: true },
+      keep: true,
+    }).silmaril;
+    assert.equal(provenance.keep, true);
+    assert.equal(provenance.provenance.device_name, "Office Mac");
+    assert.equal(provenance.provenance.harness, "openclaw");
+    assert.equal(provenance.provenance.endpoint_id, undefined);
+  });
+  withMacDeviceNameLookup({
+    platform: "darwin",
+    command: () => {
+      throw new Error("SECRET-COMPUTER");
+    },
+  }, () => {
+    const provenance = t.withProvenance({
+      silmaril: { provenance: { device_name: "spoofed" } },
+    }).silmaril.provenance;
+    assert.equal(provenance.device_name, undefined);
+    assert.equal(provenance.harness, "openclaw");
+  });
+});
+
+test("non-darwin platforms do not read a mac computer name", async () => {
+  const source = await readFile(path.join(repoRoot, "index.ts"), "utf8");
+  assert.equal(source.includes("hostname"), false);
+  assert.equal(source.includes("LocalHostName"), false);
+  assert.match(source, /execFileSync\(invocation\.file, \[\.\.\.invocation\.args\]/);
+  assert.match(source, /\/usr\/sbin\/scutil/);
+  assert.match(source, /"--get", "ComputerName"/);
+  for (const platform of ["linux", "win32"]) {
+    let calls = 0;
+    withMacDeviceNameLookup({
+      platform,
+      command: () => {
+        calls += 1;
+        return "Office Mac";
+      },
+    }, () => {
+      const provenance = t.withProvenance({
+        silmaril: { provenance: { device_name: "spoofed" } },
+      }).silmaril.provenance;
+      assert.equal(calls, 0);
+      assert.equal(provenance.device_name, undefined);
+      assert.equal(provenance.harness, "openclaw");
+    });
+  }
+});
+
+test("computer name lookup failure still classifies and does not log the name", async () => {
+  let calls = 0;
+  await withMacDeviceNameLookup({
+    platform: "darwin",
+    command: () => {
+      calls += 1;
+      throw new Error("SECRET-COMPUTER");
+    },
+  }, async () => {
+    await withConsoleCapture(async ({ logs, errors }) => {
+      const result = await t.classifyHookPayload(
+        {
+          classify: async (_text, options) => {
+            assert.equal(options.metadata.silmaril.provenance.device_name, undefined);
+            assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
+            return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          },
+        },
+        "payload",
+        makeMeta(),
+      );
+      assert.equal(result.prediction, "BENIGN");
+      const rendered = [...logs, ...errors].join("\n");
+      assert.equal(rendered.includes("SECRET-COMPUTER"), false);
+    });
+    t.withProvenance({});
+    assert.equal(calls, 1);
   });
 });
 
