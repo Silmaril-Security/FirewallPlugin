@@ -50,37 +50,45 @@ Runtime behavior:
   loading
 - `gateway_start` logs `firewall-plugin: installed` when the Gateway invokes
   startup hooks
-- `before_agent_run` sends agent run text as `USER_INPUT`
-- `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL`
-- `before_tool_call` can return `{ block: true, blockReason }` only when
-  `shadowMode=false` and `blockMalicious=true`
-- `after_tool_call` sends tool result text as `TOOL_RESPONSE`
+- `before_prompt_build` classifies prompt text as `USER_INPUT`. Warn mode can
+  return `{ prependContext }` with one fixed content-free warning. Block mode
+  leaves this hook unchanged and does not record `blockUnavailable` here
+- `before_agent_run` classifies the final agent prompt as `USER_INPUT`. When
+  the effective mode is `block` and `prediction === "MALICIOUS"`, it can return
+  `{ outcome: "block", reason }`
+- `before_prompt_build` and `before_agent_run` share one content-sensitive
+  classification for five seconds
+- `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL` and
+  can return `{ block: true, blockReason }` under that same block rule
+- `after_tool_call` classifies tool result text as `TOOL_RESPONSE` and does not
+  block. A malicious Block-mode result records native action `unavailable` and
+  `blockUnavailable: true`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
-  completes; this external hook is observe-only and cannot replace tool results
-- `message_sending` sends final outbound assistant message text as `LLM_OUTPUT`
-- `message_sending` can return `{ cancel: true, content }` with safe replacement
-  metadata only when `shadowMode=false` and `blockMalicious=true`
-- `reply_payload_sending` can rewrite unsafe final payloads with readable text and
-  native `MessagePresentation` blocks where OpenClaw provides that surface
-- `message_sent` emits content-free delivery telemetry without another
-  classifier call
+  completes; this external hook is observe-only and cannot replace tool results.
+  A malicious Block-mode result records the same unavailable action
+- `message_sending` classifies final outbound assistant message text as
+  `LLM_OUTPUT`. Block mode can return `{ cancel: true, cancelReason }` with no
+  replacement content field
+- `reply_payload_sending` classifies normalized delivery payload text as
+  `LLM_OUTPUT`. Block mode can return `{ cancel: true }` and leaves the payload
+  unchanged
+- `message_sending` and `reply_payload_sending` share one content-sensitive
+  classification for five seconds; changed content is classified separately
+- `message_sent` emits content-free delivery telemetry without a classifier call
 - `subagent_delivery_target`, `subagent_spawned`, and `subagent_ended` classify
-  lifecycle text for visibility and log sanitized summaries without attempting
-  enforcement
+  lifecycle text for visibility and log sanitized summaries without enforcement.
+  A malicious Block-mode result records native action `unavailable`
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
-- duplicate `message_sending` and `reply_payload_sending` callbacks share a
-  short-lived, content-sensitive classifier result
-- no warning, stub, prompt, system, or developer context is added
-- final assistant output can be canceled by the host when explicit blocking is
-  enabled
+- Shadow adds no agent-visible context. Warn can prepend the fixed
+  `before_prompt_build` warning. The plugin adds no system or developer context
 - no wrapper tools, exporters, or queues are registered
-- classifier errors fail open
+- classifier errors fail open and OpenClaw execution continues
 - raw prompt, tool input, and tool output text is not logged or returned in
-  block reasons
+  block reasons. Block text is `Silmaril Firewall blocked this request: <risk label>. Continue without using the blocked content.`
 
 Configuration fields:
 
@@ -88,10 +96,25 @@ Configuration fields:
 - `apiKey`: legacy Silmaril API key fallback; may remain the plugin identity key
   when `silmarilApiKey` is present
 - `apiUrl`: full Silmaril classify endpoint URL, ending in `/classify`
-- `timeoutMs`: optional classifier timeout in milliseconds; default `2500`
-- `shadowMode`: optional pass-through mode; default `true`
-- `blockMalicious`: optional malicious blocking at every supported host
-  enforcement boundary; default `false`; only effective when `shadowMode=false`
+- `endpointId`: optional canonical UUID v4. Invalid values are ignored.
+  Classifier requests still include harness provenance. On macOS that provenance
+  can include the local computer name, and classification does not wait for the
+  lookup
+- `timeoutMs`: optional classifier timeout in milliseconds. Finite numbers,
+  including numeric strings, are truncated toward zero and then kept when that
+  integer is from `250` through `10000`. Omitted, non-finite, or out-of-range
+  values use `2500`
+- `mode`: optional `shadow`, `warn`, or `block` override. A set value wins over
+  the legacy booleans below and over `mode` on the classifier response
+- `shadowMode`: legacy flag. `true` forces Shadow, including when
+  `blockMalicious` is `true`. The schema does not default this field
+- `blockMalicious`: legacy flag. `true` selects Block only when `mode` is unset
+  and `shadowMode` is not `true`. `shadowMode: false` with `blockMalicious`
+  omitted or `false` stays Shadow
+
+Omitting `mode` and both legacy flags leaves the plugin mode unset. The
+effective mode is then the classifier response mode, or Shadow when the
+response has no mode. Only an exact `prediction === "MALICIOUS"` is enforceable.
 
 The plugin entry must also set `hooks.allowConversationAccess=true`; OpenClaw
 otherwise blocks `before_agent_run` for non-bundled plugins.
@@ -192,6 +215,9 @@ for direct source loading or the CLI install path is unavailable.
    }
    ```
 
+   This example sets the legacy flags to Shadow. Set `mode` to `warn` or
+   `block` when that override should win over the legacy flags.
+
 8. Alternative install flows.
 
    Use these only when the user explicitly asks for a different install style or
@@ -247,6 +273,7 @@ for direct source loading or the CLI install path is unavailable.
    Shape: hook-only
    Typed hooks:
    gateway_start
+   before_prompt_build
    before_agent_run
    before_tool_call
    after_tool_call
@@ -258,6 +285,12 @@ for direct source loading or the CLI install path is unavailable.
    subagent_spawned
    subagent_ended
    ```
+
+   `openclaw plugins inspect firewall-plugin --runtime` loads the module in the
+   inspecting CLI and reports `Status: loaded` plus the typed hooks registered
+   in `index.ts`. Runtime inspection verifies those registrations in the CLI
+   process. An actual hook event, such as `firewall-plugin: installed` in the
+   smoke test below, is the running Gateway proof.
 
 11. Optional hosted demo walkthrough:
 
@@ -277,17 +310,31 @@ for direct source loading or the CLI install path is unavailable.
     openclaw agent --agent main --message "Reply with FIREWALL_PLUGIN_SMOKE_OK."
     ```
 
-    Then run a tool-using prompt appropriate for the user's configured agent and
-    inspect gateway logs for the install confirmation and firewall
-    classification lines:
+    Then run a tool-using prompt appropriate for the user's configured agent.
+    The plugin emits these lines when the corresponding hook classifies.
+    `before_prompt_build` and `before_agent_run` share the prompt cache, and
+    `message_sending` and `reply_payload_sending` share the outbound cache. The
+    same classified text and conversation within five seconds reuses that
+    classification when the stable event id matches, or when neither hook has
+    one, and does not emit a second `result:` line. Hook
+    registration and a running Gateway event such as `firewall-plugin: installed`
+    stay independent of those cache hits.
 
     ```text
     firewall-plugin: installed
+    [firewall] before_prompt_build result:
     [firewall] before_agent_run result:
     [firewall] before_tool_call result:
+    [firewall] after_tool_call result:
     [firewall] tool_result_persist result:
     [firewall] message_sending result:
+    [firewall] reply_payload_sending result:
+    [firewall] message_sent observed:
     ```
+
+    Subagent lifecycle lines are emitted only when those hooks run. Lines ending
+    in `blocked:` appear when the effective mode is `block` and the classifier
+    returns `prediction` `MALICIOUS`.
 
 ## Failure Handling
 
@@ -295,7 +342,10 @@ If installation or verification fails, collect:
 
 - the exact command
 - exit code
-- relevant `openclaw --no-color plugins inspect firewall-plugin` output
+- relevant `openclaw --no-color plugins inspect firewall-plugin --runtime` output
+- relevant metadata-only `openclaw --no-color plugins inspect firewall-plugin`
+  output when registry status is needed; that cold inspect reports enabled,
+  disabled, or error and does not report `Status: loaded`
 - relevant `openclaw --no-color plugins doctor` output
 - relevant gateway log lines
 
