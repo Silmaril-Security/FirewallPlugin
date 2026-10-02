@@ -319,7 +319,14 @@ openclaw gateway restart
 
 Send a normal OpenClaw message, then send a message that uses at least one tool.
 The mock classifier always returns `BENIGN`, so this smoke checks classification
-logs. The plugin emits these lines when OpenClaw invokes the corresponding hooks:
+logs. The plugin emits these lines when the corresponding hook classifies.
+`before_prompt_build` and `before_agent_run` share the prompt cache, and
+`message_sending` and `reply_payload_sending` share the outbound cache. The
+same classified text and conversation within five seconds reuses that
+classification when the stable event id matches, or when neither hook has
+one, and does not emit a second `result:` line. Hook
+registration and a running Gateway event such as `firewall-plugin: installed`
+stay independent of those cache hits.
 
 ```text
 firewall-plugin: installed

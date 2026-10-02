@@ -109,8 +109,16 @@ firewall-plugin: installed
 [firewall] message_sent observed:
 ```
 
-Log lines appear when OpenClaw invokes the corresponding hook. Subagent lines
-appear only for those lifecycle hooks.
+Log lines appear when the corresponding hook classifies. Subagent lines
+appear only for those lifecycle hooks. `before_prompt_build` and
+`before_agent_run` share the prompt cache, and `message_sending` and
+`reply_payload_sending` share the outbound cache. The same classified text
+and conversation within five seconds reuses that classification when the
+stable event id matches, or when neither hook has one, and does not emit a
+second `result:` line, so both `result:`
+lines in a pair are not required on a cache hit. Hook registration and a
+running Gateway event such as `firewall-plugin: installed` stay independent
+of those cache hits.
 
 If classifier config is missing, the plugin should warn once and log skipped
 classifications with `missing_config`.
