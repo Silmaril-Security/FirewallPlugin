@@ -15,7 +15,7 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.2.4";
+const PLUGIN_VERSION = "1.2.5";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -170,8 +170,8 @@ export default definePluginEntry({
           runtime.config.endpointId,
         );
         const mode = effectiveMode(runtime.config, result);
-        const malicious = result?.prediction === "MALICIOUS";
-        if (malicious && mode === "warn") {
+        const policyCandidate = isPolicyBlockCandidate(result);
+        if (policyCandidate && mode === "warn") {
           emitOpenClawLocalEvidence(
             meta,
             text,
@@ -183,7 +183,7 @@ export default definePluginEntry({
           );
           return { prependContext: WARN_CONTEXT };
         }
-        if (!(malicious && mode === "block")) {
+        if (!(policyCandidate && mode === "block")) {
           emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
         }
       } catch (err) {
@@ -918,7 +918,13 @@ function readEndpointId(value: unknown): string | undefined {
 }
 
 function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | undefined): result is BlockResult {
-  return effectiveMode(config, result) === "block" && result?.prediction === "MALICIOUS";
+  return effectiveMode(config, result) === "block"
+    && isPolicyBlockCandidate(result);
+}
+
+function isPolicyBlockCandidate(result: BlockResult | undefined): result is BlockResult {
+  return result?.prediction === "MALICIOUS"
+    || result?.governance?.action === "block";
 }
 
 function effectiveMode(config: RuntimeConfig, result: BlockResult | undefined): FirewallMode {
@@ -940,8 +946,8 @@ function emitOpenClawLocalEvidence(
     return;
   }
   const mode = effectiveMode(config, result);
-  const malicious = result.prediction === "MALICIOUS";
-  const resolvedNativeAction = malicious && mode === "block" && !enforceableBoundary
+  const policyCandidate = isPolicyBlockCandidate(result);
+  const resolvedNativeAction = policyCandidate && mode === "block" && !enforceableBoundary
     ? "unavailable"
     : nativeAction;
   emitLocalProtectionEventBestEffort({
@@ -953,7 +959,7 @@ function emitOpenClawLocalEvidence(
     sessionIdentity: meta.sessionId ?? meta.sessionKey ?? meta.conversationId,
     toolName: meta.toolName,
     classification: result,
-    policyDecision: malicious
+    policyDecision: policyCandidate
       ? mode === "block" && enforceableBoundary
         ? "block"
         : mode === "warn" && warnDelivery === "delivered"
@@ -961,8 +967,8 @@ function emitOpenClawLocalEvidence(
           : "monitor"
       : "allow",
     nativeAction: resolvedNativeAction,
-    ...(malicious && mode === "warn" ? { warnDelivery: warnDelivery ?? "unsupported" } : {}),
-    ...(malicious && mode === "block" && !enforceableBoundary ? { blockUnavailable: true } : {}),
+    ...(policyCandidate && mode === "warn" ? { warnDelivery: warnDelivery ?? "unsupported" } : {}),
+    ...(policyCandidate && mode === "block" && !enforceableBoundary ? { blockUnavailable: true } : {}),
     producer: PLUGIN_ID,
     producerVersion: PLUGIN_VERSION,
     pluginVersion: PLUGIN_VERSION,
@@ -1045,6 +1051,7 @@ function describeSurface(meta: HookLogMeta): string {
 function describeRisk(result: BlockResult): string {
   const outcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome : undefined;
   const prediction = typeof result.prediction === "string" ? result.prediction.trim().toLowerCase() : undefined;
+  const governanceBlocked = result.governance?.action === "block";
   switch (outcome?.trim().toLowerCase()) {
     case "information_disclosure":
       return "Sensitive information disclosure";
@@ -1058,8 +1065,16 @@ function describeRisk(result: BlockResult): string {
     case "service_disruption":
       return "Service disruption risk";
     case "benign":
-      return "No flagged risk";
+      if (governanceBlocked && prediction !== "malicious") {
+        return "Governance policy denial";
+      }
+      return prediction === "malicious"
+        ? "Unexpected classification conflict"
+        : "No flagged risk";
     case undefined:
+      if (governanceBlocked && prediction !== "malicious") {
+        return "Governance policy denial";
+      }
       return prediction === "benign" ? "No flagged risk" : "Unsafe content";
     default:
       return outcome
@@ -1395,6 +1410,7 @@ export const __testInternals = {
   outboundDedupeKey,
   buildStableRequestId,
   shouldBlockClassification,
+  isPolicyBlockCandidate,
   effectiveMode,
   shouldBlockToolCall,
   buildBlockResult,

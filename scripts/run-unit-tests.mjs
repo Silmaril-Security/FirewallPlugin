@@ -15,6 +15,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { Firewall as RealFirewall } from "@silmaril-security/sdk";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(repoRoot, ".unit-test-build");
@@ -284,6 +285,40 @@ test("config: timeout bounds are enforced", () => {
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: 10001 }).timeoutMs, 2500);
 });
 
+test("actual pinned SDK preserves a governance-only block response", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    prediction: "BENIGN",
+    score: 0.01,
+    threshold: 0.5,
+    governance: {
+      action: "block",
+      rule_id: "synthetic-rule",
+      policy_version: "synthetic-policy",
+    },
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+  try {
+    const firewall = new RealFirewall({
+      apiKey: "test-key",
+      apiUrl: "https://alpha.example/classify",
+      timeoutMs: 1_000,
+    });
+    const result = await firewall.classify("synthetic input", { hook: "user_input" });
+    assert.equal(result.prediction, "BENIGN");
+    assert.deepEqual(result.governance, {
+      action: "block",
+      ruleId: "synthetic-rule",
+      policyVersion: "synthetic-policy",
+    });
+    assert.equal(t.isPolicyBlockCandidate(result), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("config and metadata use canonical plugin-owned endpoint provenance", () => {
   const endpointId = "2b64e603-f82a-4aec-9524-9736472dc80a";
   assert.equal(t.resolveRuntimeConfig({ apiKey: "key", apiUrl: "https://x", endpointId }).endpointId, endpointId);
@@ -294,7 +329,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.4",
+      version: "1.2.5",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -770,8 +805,8 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
-  assert.equal(packageJson.version, "1.2.4");
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
+  assert.equal(packageJson.version, "1.2.5");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.6");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
@@ -1028,6 +1063,15 @@ test("describeRisk treats benign results without outcome as clean", () => {
   assert.equal(t.describeRisk({ prediction: "BENIGN" }), "No flagged risk");
   assert.equal(t.describeRisk({ prediction: "MALICIOUS" }), "Unsafe content");
   assert.equal(t.describeRisk({ prediction: "MALICIOUS", primaryOutcome: "control_abuse" }), "Unsafe agent control attempt");
+  assert.equal(t.describeRisk({
+    prediction: "BENIGN",
+    primaryOutcome: "benign",
+    governance: { action: "block", policyVersion: "synthetic-policy" },
+  }), "Governance policy denial");
+  assert.equal(t.describeRisk({
+    prediction: "MALICIOUS",
+    primaryOutcome: "benign",
+  }), "Unexpected classification conflict");
 });
 
 test("plugin: registers startup and classifier hooks", () => {
@@ -1305,6 +1349,89 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
   });
 });
 
+test("plugin: governance-only denials block every enforceable native boundary", async () => {
+  const env = registerPlugin({
+    config: { apiKey: "k", apiUrl: "u", mode: "block" },
+  });
+  globalThis.__silmarilFirewallClassify = async () => ({
+    prediction: "BENIGN",
+    score: 0.01,
+    threshold: 0.5,
+    primaryOutcome: "benign",
+    governance: { action: "block", policyVersion: "synthetic-policy" },
+  });
+
+  await withSilencedConsole(async () => {
+    const prompt = await hook(env, "before_agent_run")({
+      prompt: "governed prompt",
+      sessionId: "session-governance",
+    }, {});
+    assert.equal(prompt.outcome, "block");
+    assert.match(prompt.reason, /Governance policy denial/);
+
+    const tool = await hook(env, "before_tool_call")({
+      toolName: "exec",
+      params: { command: "governed command" },
+    }, { sessionId: "session-governance", toolCallId: "call-governance" });
+    assert.deepEqual(tool, {
+      block: true,
+      blockReason: "Silmaril Firewall blocked this request: Governance policy denial. Continue without using the blocked content.",
+    });
+
+    const message = await hook(env, "message_sending")({
+      messageId: "message-governance",
+      sessionId: "session-governance",
+      content: "governed output",
+    }, {});
+    assert.equal(message.cancel, true);
+    assert.match(message.cancelReason, /Governance policy denial/);
+
+    const reply = await hook(env, "reply_payload_sending")({
+      messageId: "reply-governance",
+      sessionId: "session-governance",
+      payload: { text: "governed reply" },
+    }, {});
+    assert.deepEqual(reply, { cancel: true });
+  });
+});
+
+test("plugin: governance-only candidates retain Warn and Shadow behavior", async () => {
+  const governanceOnly = {
+    prediction: "BENIGN",
+    score: 0.01,
+    threshold: 0.5,
+    primaryOutcome: "benign",
+    governance: { action: "block", policyVersion: "synthetic-policy" },
+  };
+
+  const shadow = registerPlugin({
+    config: { apiKey: "k", apiUrl: "u", mode: "shadow" },
+  });
+  globalThis.__silmarilFirewallClassify = async () => governanceOnly;
+  await withSilencedConsole(async () => {
+    assert.equal(await hook(shadow, "before_tool_call")({
+      toolName: "exec",
+      params: { command: "governed" },
+    }, {}), undefined);
+  });
+
+  const warn = registerPlugin({
+    config: { apiKey: "k", apiUrl: "u", mode: "warn" },
+  });
+  globalThis.__silmarilFirewallClassify = async () => governanceOnly;
+  await withSilencedConsole(async () => {
+    const warning = await hook(warn, "before_prompt_build")({
+      prompt: "governed prompt",
+      sessionId: "session-warn-governance",
+    }, {});
+    assert.match(warning.prependContext, /^Silmaril Firewall warning:/);
+    assert.equal(await hook(warn, "before_agent_run")({
+      prompt: "governed prompt",
+      sessionId: "session-warn-governance",
+    }, {}), undefined);
+  });
+});
+
 test("plugin: outbound callbacks share one classification and changed content cannot collide", async () => {
   const env = registerPlugin({
     config: { apiKey: "k", apiUrl: "u", blockMalicious: true, shadowMode: false },
@@ -1371,7 +1498,7 @@ test("plugin: Shadow is silent and preserves every supported boundary", async ()
   });
 });
 
-test("decision: only an exact MALICIOUS prediction blocks", () => {
+test("decision: exact MALICIOUS or exact governance block is a policy candidate", () => {
   const config = {
     apiKey: "k",
     apiUrl: "u",
@@ -1384,6 +1511,23 @@ test("decision: only an exact MALICIOUS prediction blocks", () => {
     threshold: 0.5,
     primaryOutcome: "benign",
   }), false);
+  assert.equal(t.shouldBlockToolCall(config, {
+    prediction: "BENIGN",
+    score: 0.01,
+    threshold: 0.5,
+    primaryOutcome: "benign",
+    governance: { action: "block", policyVersion: "synthetic-policy" },
+  }), true);
+  for (const governance of [
+    undefined,
+    { action: "allow", policyVersion: "synthetic-policy" },
+    { action: "BLOCK", policyVersion: "synthetic-policy" },
+  ]) {
+    assert.equal(t.isPolicyBlockCandidate({
+      prediction: "BENIGN",
+      governance,
+    }), false);
+  }
   assert.equal(t.shouldBlockToolCall(config, {
     prediction: "BENIGN",
     score: 0.99,
@@ -1679,8 +1823,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.4",
-    pluginVersion: "1.2.4",
+    producerVersion: "1.2.5",
+    pluginVersion: "1.2.5",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1710,7 +1854,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.4");
+  assert.equal(event.provenance.pluginVersion, "1.2.5");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1749,8 +1893,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.4",
-      pluginVersion: "1.2.4",
+      producerVersion: "1.2.5",
+      pluginVersion: "1.2.5",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1780,8 +1924,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.4",
-    pluginVersion: "1.2.4",
+    producerVersion: "1.2.5",
+    pluginVersion: "1.2.5",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -1872,6 +2016,52 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
     assert.equal(shadowEvent.nativeAction, "allowed");
     assert.equal(shadowEvent.outcome, "not_observed");
     assert.equal(JSON.stringify(shadowEvent).includes("OPENCLAW_SHADOW_SECRET_CANARY"), false);
+  } finally {
+    if (savedDirectory === undefined) {
+      delete process.env.SILMARIL_LOCAL_EVENT_DIR;
+    } else {
+      process.env.SILMARIL_LOCAL_EVENT_DIR = savedDirectory;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local evidence: governance-only observer surfaces report unavailable without relabeling BENIGN", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-governance-"));
+  const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
+  try {
+    process.env.SILMARIL_LOCAL_EVENT_DIR = root;
+    const env = registerPlugin({
+      config: { apiKey: "k", apiUrl: "u", mode: "block" },
+    });
+    globalThis.__silmarilFirewallClassify = async () => ({
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+      primaryOutcome: "benign",
+      governance: { action: "block", policyVersion: "synthetic-policy" },
+    });
+    await withSilencedConsole(async () => {
+      assert.equal(await hook(env, "after_tool_call")({
+        toolName: "exec",
+        result: "governed result",
+      }, { sessionId: "session-governance", toolCallId: "call-governance" }), undefined);
+      assert.equal(await hook(env, "subagent_spawned")({
+        childSessionId: "child-governance",
+        childGoal: "governed child",
+      }, { sessionId: "session-governance" }), undefined);
+    });
+    const files = await waitForJSONFiles(root, 2);
+    const events = await Promise.all(
+      files.map(async (file) => JSON.parse(await readFile(path.join(root, file), "utf8"))),
+    );
+    assert.ok(events.every((event) => (
+      event.prediction === "benign"
+      && event.policyDecision === "monitor"
+      && event.nativeAction === "unavailable"
+      && event.blockUnavailable === true
+      && event.provenance.pluginVersion === "1.2.5"
+    )));
   } finally {
     if (savedDirectory === undefined) {
       delete process.env.SILMARIL_LOCAL_EVENT_DIR;
