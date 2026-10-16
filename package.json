@@ -1,8 +1,12 @@
 {
   "name": "@silmaril-security/firewall-plugin",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "license": "Apache-2.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Silmaril-Security/FirewallPlugin.git"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "npm run build && node scripts/run-unit-tests.mjs",
