@@ -54,19 +54,20 @@ Runtime behavior:
   return `{ prependContext }` with one fixed content-free warning. Block mode
   leaves this hook unchanged and does not record `blockUnavailable` here
 - `before_agent_run` classifies the final agent prompt as `USER_INPUT`. When
-  the effective mode is `block` and `prediction === "MALICIOUS"`, it can return
+  the effective mode is `block` and the model prediction is `MALICIOUS` or
+  `governance.action` is `block`, it can return
   `{ outcome: "block", reason }`
 - `before_prompt_build` and `before_agent_run` share one content-sensitive
   classification for five seconds
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL` and
   can return `{ block: true, blockReason }` under that same block rule
 - `after_tool_call` classifies tool result text as `TOOL_RESPONSE` and does not
-  block. A malicious Block-mode result records native action `unavailable` and
+  block. A policy-candidate Block-mode result records native action `unavailable` and
   `blockUnavailable: true`
 - `tool_result_persist` starts a fail-open classification request for persisted
   tool result text as `TOOL_RESPONSE` and logs the result when the request
   completes; this external hook is observe-only and cannot replace tool results.
-  A malicious Block-mode result records the same unavailable action
+  A policy-candidate Block-mode result records the same unavailable action
 - `message_sending` classifies final outbound assistant message text as
   `LLM_OUTPUT`. Block mode can return `{ cancel: true, cancelReason }` with no
   replacement content field
@@ -78,7 +79,7 @@ Runtime behavior:
 - `message_sent` emits content-free delivery telemetry without a classifier call
 - `subagent_delivery_target`, `subagent_spawned`, and `subagent_ended` classify
   lifecycle text for visibility and log sanitized summaries without enforcement.
-  A malicious Block-mode result records native action `unavailable`
+  A policy-candidate Block-mode result records native action `unavailable`
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
@@ -114,7 +115,8 @@ Configuration fields:
 
 Omitting `mode` and both legacy flags leaves the plugin mode unset. The
 effective mode is then the classifier response mode, or Shadow when the
-response has no mode. Only an exact `prediction === "MALICIOUS"` is enforceable.
+response has no mode. An exact `prediction === "MALICIOUS"` or exact
+`governance.action === "block"` is enforceable; malformed actions are not.
 
 The plugin entry must also set `hooks.allowConversationAccess=true`; OpenClaw
 otherwise blocks `before_agent_run` for non-bundled plugins.
@@ -242,7 +244,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.4.tgz
+   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.5.tgz
    openclaw plugins enable firewall-plugin
    ```
 
@@ -334,7 +336,7 @@ for direct source loading or the CLI install path is unavailable.
 
     Subagent lifecycle lines are emitted only when those hooks run. Lines ending
     in `blocked:` appear when the effective mode is `block` and the classifier
-    returns `prediction` `MALICIOUS`.
+    returns `prediction` `MALICIOUS` or governance action `block`.
 
 ## Failure Handling
 
