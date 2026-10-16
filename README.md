@@ -177,13 +177,15 @@ not represented as independently verified prevention.
 
 ## Install
 
-After version 1.2.5 is published, install that package by name:
+After version 1.2.6 is published, install that package by name:
 
 ```sh
-openclaw plugins install @silmaril-security/firewall-plugin@1.2.5
+openclaw plugins install @silmaril-security/firewall-plugin@1.2.6
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
+
+The corresponding immutable GitHub release uses tag `v1.2.6`.
 
 This repository also supports direct source loading and two local CLI install styles.
 
@@ -224,7 +226,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-security-firewall-plugin-1.2.5.tgz
+openclaw plugins install ./silmaril-security-firewall-plugin-1.2.6.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
