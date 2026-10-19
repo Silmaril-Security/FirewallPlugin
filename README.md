@@ -119,10 +119,11 @@ plugin to receive `before_agent_run`. Without that host permission, OpenClaw
 loads the remaining hooks but skips prompt classification and reports a plugin
 diagnostic.
 
-`timeoutMs` is optional. Finite numbers, including numeric strings, are
-truncated toward zero and then kept when that integer is from `250` through
-`10000`. Omitted, non-finite, or out-of-range values use `2500`. That value
-bounds each classifier request.
+`timeoutMs` is optional. In OpenClaw plugin configuration, use a JSON integer
+from `250` through `10000`; for example, `"timeoutMs": 2500`. Omit it to use
+`2500`. The host validates configuration against the plugin manifest before
+loading the runtime and rejects numeric strings, fractional numbers, and values
+outside that range. That value bounds each classifier request.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance` with `schema_version` `1` and harness `openclaw`. An omitted or invalid endpoint ID omits `endpoint_id`. On macOS, provenance can also include the local computer name. Classification does not wait for that lookup, and other platforms omit it.
 
