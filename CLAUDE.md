@@ -101,10 +101,10 @@ Configuration fields:
   Classifier requests still include harness provenance. On macOS that provenance
   can include the local computer name, and classification does not wait for the
   lookup
-- `timeoutMs`: optional classifier timeout in milliseconds. Finite numbers,
-  including numeric strings, are truncated toward zero and then kept when that
-  integer is from `250` through `10000`. Omitted, non-finite, or out-of-range
-  values use `2500`
+- `timeoutMs`: optional classifier timeout in milliseconds. OpenClaw plugin
+  configuration accepts JSON integers from `250` through `10000`; omission uses
+  `2500`. The host validates the manifest schema before runtime loading and
+  rejects numeric strings, fractional numbers, and out-of-range values
 - `mode`: optional `shadow`, `warn`, or `block` override. A set value wins over
   the legacy booleans below and over `mode` on the classifier response
 - `shadowMode`: legacy flag. `true` forces Shadow, including when
