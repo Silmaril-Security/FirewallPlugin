@@ -244,7 +244,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.6.tgz
+   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.7.tgz
    openclaw plugins enable firewall-plugin
    ```
 
