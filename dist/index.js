@@ -225,7 +225,7 @@ function omitUndefined(record) {
 
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
-var PLUGIN_VERSION = "1.2.7";
+var PLUGIN_VERSION = "1.2.8";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 var MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -948,6 +948,7 @@ function localHook(meta) {
     return "subagent";
   }
   switch (meta.hookName) {
+    case "before_prompt_build":
     case "before_agent_run":
       return "user_input";
     case "before_tool_call":

@@ -159,7 +159,7 @@ Hooks that receive a classification result can emit one bounded
 `LocalProtectionEventV1` JSON file for the local Silmaril app.
 `before_agent_run` emits only when it returns a block. `before_prompt_build`
 does not emit when the result is a policy candidate in Block mode. Warn events from
-`before_prompt_build` record hook `unknown`. `gateway_start` and `message_sent`
+`before_prompt_build` record hook `user_input`. `gateway_start` and `message_sent`
 do not emit. Set
 `SILMARIL_LOCAL_EVENT_DIR` to override the directory; otherwise files go
 to `~/Library/Application Support/Silmaril/Evidence/incoming`.
@@ -178,15 +178,15 @@ not represented as independently verified prevention.
 
 ## Install
 
-The currently published npm release is 1.2.6. Install it by name:
+Install the package version documented by this release:
 
 ```sh
-openclaw plugins install @silmaril-security/firewall-plugin@1.2.6
+openclaw plugins install @silmaril-security/firewall-plugin@1.2.8
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
 
-The corresponding immutable GitHub release uses tag `v1.2.6`.
+The corresponding immutable GitHub release uses tag `v1.2.8`.
 
 This repository also supports direct source loading and two local CLI install styles.
 
@@ -227,7 +227,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-security-firewall-plugin-1.2.7.tgz
+openclaw plugins install ./silmaril-security-firewall-plugin-1.2.8.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
