@@ -15,7 +15,7 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.2.7";
+const PLUGIN_VERSION = "1.2.8";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -981,6 +981,7 @@ function localHook(meta: HookLogMeta): LocalHook {
     return "subagent";
   }
   switch (meta.hookName) {
+    case "before_prompt_build":
     case "before_agent_run":
       return "user_input";
     case "before_tool_call":

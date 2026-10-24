@@ -1,7 +1,12 @@
 # Release notes
 
-## 1.2.7 (unreleased)
+## 1.2.8
 
-The packaged configuration guide matches the host manifest: `timeoutMs` is a JSON integer from 250 through 10000 milliseconds; omission uses 2500. Fractional and out-of-range values are rejected by the host. The documentation correction is already on main but is absent from npm 1.2.6.
+Prompt-build warning evidence records the user_input boundary, matching the
+classifier and macOS evidence consumer. Reproducible npm, archive, and GitHub
+installation references follow this package version.
 
-The package and runtime provenance identify version 1.2.7. Publishing requires a separate authorized release; npm 1.2.6 remains the current published package until then.
+## 1.2.7
+
+Aligned the packaged timeoutMs guide with the host manifest: a JSON integer
+from 250 through 10000 milliseconds, with a default of 2500.

@@ -329,7 +329,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.7",
+      version: "1.2.8",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -805,7 +805,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
-  assert.equal(packageJson.version, "1.2.7");
+  assert.equal(packageJson.version, "1.2.8");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.6");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
@@ -822,6 +822,19 @@ test("install docs: default clone flow does not pin simplified-dev", async () =>
     assert.equal(source.includes("git checkout simplified-dev"), false);
     assert.equal(source.includes("select the simplified branch"), false);
     assert.ok(source.includes("allowConversationAccess"));
+  }
+});
+
+test("install docs: npm, tag, and archive examples match the package version", async () => {
+  const manifest = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
+  const readme = await readFile(path.join(repoRoot, "README.md"), "utf8");
+  const claude = await readFile(path.join(repoRoot, "CLAUDE.md"), "utf8");
+  const install = readme.match(/^openclaw plugins install @silmaril-security\/firewall-plugin@(\S+)$/m);
+  assert.equal(install?.[1], manifest.version);
+  assert.ok(readme.includes(`tag \`v${manifest.version}\``));
+  for (const source of [readme, claude]) {
+    const archive = source.match(/openclaw plugins install \.\/silmaril-security-firewall-plugin-(\S+)\.tgz/);
+    assert.equal(archive?.[1], manifest.version);
   }
 });
 
@@ -1823,8 +1836,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.7",
-    pluginVersion: "1.2.7",
+    producerVersion: "1.2.8",
+    pluginVersion: "1.2.8",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -1854,7 +1867,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.7");
+  assert.equal(event.provenance.pluginVersion, "1.2.8");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -1893,8 +1906,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.7",
-      pluginVersion: "1.2.7",
+      producerVersion: "1.2.8",
+      pluginVersion: "1.2.8",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -1924,8 +1937,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.7",
-    pluginVersion: "1.2.7",
+    producerVersion: "1.2.8",
+    pluginVersion: "1.2.8",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -2026,6 +2039,40 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
   }
 });
 
+test("local evidence: prompt Warn reports the user-input boundary without raw content", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-prompt-warn-"));
+  const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
+  try {
+    for (const governanceOnly of [false, true]) {
+      const directory = path.join(root, governanceOnly ? "governance" : "malicious");
+      process.env.SILMARIL_LOCAL_EVENT_DIR = directory;
+      const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u", mode: "warn" } });
+      globalThis.__silmarilFirewallClassify = async () => ({
+        prediction: governanceOnly ? "BENIGN" : "MALICIOUS",
+        score: governanceOnly ? 0.01 : 0.99,
+        threshold: 0.5,
+        ...(governanceOnly ? { governance: { action: "block", policyVersion: "fixture" } } : {}),
+      });
+      const warning = await withSilencedConsole(() => hook(env, "before_prompt_build")({
+        prompt: "PROMPT_WARN_PRIVATE_CANARY",
+        sessionId: "prompt-warn-session",
+      }, {}));
+      assert.match(warning.prependContext, /^Silmaril Firewall warning:/);
+      const event = await readOnlyJSONEvent(directory);
+      assert.equal(event.hook, "user_input");
+      assert.equal(event.nativeAction, "warning_context_returned");
+      assert.equal(event.warnDelivery, "delivered");
+      assert.equal(event.evidenceTruth, "plugin_reported");
+      assert.equal(event.prediction, governanceOnly ? "benign" : "malicious");
+      assert.equal(JSON.stringify(event).includes("PROMPT_WARN_PRIVATE_CANARY"), false);
+    }
+  } finally {
+    if (savedDirectory === undefined) delete process.env.SILMARIL_LOCAL_EVENT_DIR;
+    else process.env.SILMARIL_LOCAL_EVENT_DIR = savedDirectory;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("local evidence: governance-only observer surfaces report unavailable without relabeling BENIGN", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-governance-"));
   const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
@@ -2060,7 +2107,7 @@ test("local evidence: governance-only observer surfaces report unavailable witho
       && event.policyDecision === "monitor"
       && event.nativeAction === "unavailable"
       && event.blockUnavailable === true
-      && event.provenance.pluginVersion === "1.2.7"
+      && event.provenance.pluginVersion === "1.2.8"
     )));
   } finally {
     if (savedDirectory === undefined) {
