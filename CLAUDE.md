@@ -58,7 +58,8 @@ Runtime behavior:
   `governance.action` is `block`, it can return
   `{ outcome: "block", reason }`
 - `before_prompt_build` and `before_agent_run` share one content-sensitive
-  classification for five seconds
+  classification for five seconds only when both callbacks provide the same
+  stable event ID; ID-less callbacks classify independently
 - `before_tool_call` sends JSON-serialized tool parameters as `TOOL_CALL` and
   can return `{ block: true, blockReason }` under that same block rule
 - `after_tool_call` classifies tool result text as `TOOL_RESPONSE` and does not
@@ -75,7 +76,8 @@ Runtime behavior:
   `LLM_OUTPUT`. Block mode can return `{ cancel: true }` and leaves the payload
   unchanged
 - `message_sending` and `reply_payload_sending` share one content-sensitive
-  classification for five seconds; changed content is classified separately
+  classification for five seconds only when both callbacks provide the same
+  stable event ID; changed content and ID-less callbacks classify separately
 - `message_sent` emits content-free delivery telemetry without a classifier call
 - `subagent_delivery_target`, `subagent_spawned`, and `subagent_ended` classify
   lifecycle text for visibility and log sanitized summaries without enforcement.
@@ -317,8 +319,8 @@ for direct source loading or the CLI install path is unavailable.
     `before_prompt_build` and `before_agent_run` share the prompt cache, and
     `message_sending` and `reply_payload_sending` share the outbound cache. The
     same classified text and conversation within five seconds reuses that
-    classification when the stable event id matches, or when neither hook has
-    one, and does not emit a second `result:` line. Hook
+    classification only when the stable event ID matches, and does not emit a
+    second `result:` line. ID-less hook invocations classify independently. Hook
     registration and a running Gateway event such as `firewall-plugin: installed`
     stay independent of those cache hits.
 

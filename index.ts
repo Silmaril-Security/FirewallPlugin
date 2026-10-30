@@ -600,6 +600,10 @@ async function classifyOnce(
 ): Promise<BlockResult | undefined> {
   const key = outboundDedupeKey(meta, text);
   pruneOutboundCache(cache, now);
+  if (!key) {
+    return classifyHookPayload(firewall, text, meta, endpointId);
+  }
+
   const existing = cache.get(key);
   if (existing && now - existing.createdAt <= OUTBOUND_DEDUPE_TTL_MS) {
     return existing.result;
@@ -615,12 +619,10 @@ async function classifyOnce(
   return result;
 }
 
-function outboundDedupeKey(meta: HookLogMeta, text: string): string {
+function outboundDedupeKey(meta: HookLogMeta, text: string): string | undefined {
   const stableEventId = meta.idempotencyKey ?? meta.messageId ?? meta.traceId ?? meta.runId;
-  const contentHash = sha256(text);
-  return stableEventId
-    ? `stable:${meta.conversationId ?? "unknown"}:${stableEventId}:${contentHash}`
-    : `content:${meta.conversationId ?? "unknown"}:${contentHash}`;
+  if (!stableEventId) return undefined;
+  return `stable:${meta.conversationId ?? "unknown"}:${stableEventId}:${sha256(text)}`;
 }
 
 function pruneOutboundCache(cache: Map<string, OutboundCacheEntry>, now: number): void {
