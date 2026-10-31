@@ -20,19 +20,14 @@ import { Firewall as RealFirewall } from "@silmaril-security/sdk";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(repoRoot, ".unit-test-build");
 const outFile = path.join(outDir, "index-under-test.mjs");
+const distOutFile = path.join(outDir, "dist-index-under-test.mjs");
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 process.env.SILMARIL_LOCAL_EVENT_DIR = path.join(outDir, "evidence");
 
-await build({
-  entryPoints: [path.join(repoRoot, "index.ts")],
-  outfile: outFile,
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  target: "node22",
-  plugins: [{
+function unitTestStubs() {
+  return {
     name: "unit-test-stubs",
     setup(buildApi) {
       buildApi.onResolve({ filter: /^openclaw\/plugin-sdk\/plugin-entry$/ }, (args) => ({
@@ -80,14 +75,32 @@ await build({
         };
       });
     },
-  }],
-});
+  };
+}
+
+async function buildUnderTest(entryPoint, outfile) {
+  await build({
+    entryPoints: [entryPoint],
+    outfile,
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    target: "node22",
+    plugins: [unitTestStubs()],
+  });
+}
+
+await buildUnderTest(path.join(repoRoot, "index.ts"), outFile);
+await buildUnderTest(path.join(repoRoot, "dist", "index.js"), distOutFile);
 
 const moduleUrl = `${pathToFileURL(outFile).href}?${Date.now()}`;
 const mod = await import(moduleUrl);
 const plugin = mod.default;
+const distMod = await import(`${pathToFileURL(distOutFile).href}?${Date.now()}`);
+const distPlugin = distMod.default;
 const t = mod.__testInternals;
 t.setMacDeviceNameLookupForTests({ platform: "linux" });
+distMod.__testInternals.setMacDeviceNameLookupForTests({ platform: "linux" });
 const tests = [];
 
 function withMacDeviceNameLookup(overrides, fn) {
@@ -148,6 +161,16 @@ async function withSilencedConsole(fn) {
   }
 }
 
+async function withFixedDateNow(now, fn) {
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    return await fn();
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
 async function loadDemoLauncher() {
   return import(`${pathToFileURL(path.join(repoRoot, "scripts", "open-playground.mjs")).href}?${Date.now()}`);
 }
@@ -167,7 +190,10 @@ test("production entry bundles the local evidence implementation", async () => {
   assert.equal(productionEntry.includes("function buildLocalProtectionEvent"), true);
 });
 
-function registerPlugin({ config = { apiKey: "test-key", apiUrl: "https://alpha.example/classify" } } = {}) {
+function registerPlugin({
+  config = { apiKey: "test-key", apiUrl: "https://alpha.example/classify" },
+  pluginEntry = plugin,
+} = {}) {
   resetFirewallStub();
 
   const hooks = new Map();
@@ -181,7 +207,7 @@ function registerPlugin({ config = { apiKey: "test-key", apiUrl: "https://alpha.
       this.warns.push(String(message));
     },
   };
-  plugin.register({
+  pluginEntry.register({
     pluginConfig: config,
     logger,
     on(name, handler, options) {
@@ -1070,6 +1096,10 @@ test("stable request and outbound dedupe identities are conversation-scoped and 
   assert.equal(firstDedupe, t.outboundDedupeKey(meta, "one"));
   assert.notEqual(firstDedupe, t.outboundDedupeKey({ ...meta, conversationId: "session-2" }, "one"));
   assert.notEqual(firstDedupe, t.outboundDedupeKey(meta, "two"));
+  assert.equal(t.outboundDedupeKey({
+    hookName: "before_agent_run",
+    conversationId: "session-1",
+  }, "one"), undefined);
 });
 
 test("describeRisk treats benign results without outcome as clean", () => {
@@ -1137,6 +1167,90 @@ test("plugin: Warn adds one bounded same-turn context and shares the prompt clas
     assert.equal(await hook(env, "before_agent_run")(event, {}), undefined);
   });
   assert.equal(globalThis.__silmarilFirewallCalls.length, 1);
+});
+
+test("plugin: back-to-back ID-less events classify independently in every mode", async () => {
+  const cases = [
+    { name: "block", config: { apiKey: "k", apiUrl: "u", mode: "block" }, hookName: "before_agent_run" },
+    { name: "warn", config: { apiKey: "k", apiUrl: "u", mode: "warn" }, hookName: "before_prompt_build" },
+    { name: "shadow", config: { apiKey: "k", apiUrl: "u", mode: "shadow" }, hookName: "before_agent_run" },
+    { name: "default", config: { apiKey: "k", apiUrl: "u" }, hookName: "before_agent_run" },
+  ];
+
+  for (const testCase of cases) {
+    const env = registerPlugin({ config: testCase.config });
+    let invocation = 0;
+    globalThis.__silmarilFirewallClassify = async () => {
+      invocation += 1;
+      return invocation === 1
+        ? { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" }
+        : { prediction: "MALICIOUS", score: 0.99, threshold: 0.5, primaryOutcome: "control_abuse" };
+    };
+    const event = { prompt: "same ID-less prompt", sessionId: `session-${testCase.name}` };
+
+    await withFixedDateNow(1_700_000_000_000, () =>
+      withSilencedConsole(async () => {
+        const first = await hook(env, testCase.hookName)(event, {});
+        const second = await hook(env, testCase.hookName)(event, {});
+        assert.equal(first, undefined);
+        if (testCase.name === "block") {
+          assert.equal(second.outcome, "block");
+        } else if (testCase.name === "warn") {
+          assert.match(second.prependContext, /^Silmaril Firewall warning:/);
+        } else {
+          assert.equal(second, undefined);
+        }
+      }));
+
+    assert.equal(globalThis.__silmarilFirewallCalls.length, 2, testCase.name);
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.requestId, undefined);
+    assert.equal(globalThis.__silmarilFirewallCalls[1].options.requestId, undefined);
+  }
+});
+
+test("bundled plugin keeps ID-less decisions fresh across tool and lifecycle activity", async () => {
+  const env = registerPlugin({
+    config: { apiKey: "k", apiUrl: "u", mode: "block" },
+    pluginEntry: distPlugin,
+  });
+  let promptInvocations = 0;
+  globalThis.__silmarilFirewallClassify = async (_text, options) => {
+    if (options.metadata.eventType === "before_agent_run") {
+      promptInvocations += 1;
+      if (promptInvocations === 2) {
+        return {
+          prediction: "MALICIOUS",
+          score: 0.99,
+          threshold: 0.5,
+          primaryOutcome: "control_abuse",
+        };
+      }
+    }
+    return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+  };
+  const promptEvent = { prompt: "same ID-less prompt", sessionId: "session-intervening" };
+
+  await withFixedDateNow(1_700_000_000_000, () =>
+    withSilencedConsole(async () => {
+      assert.equal(await hook(env, "before_agent_run")(promptEvent, {}), undefined);
+      assert.equal(await hook(env, "before_tool_call")({
+        toolName: "synthetic_tool",
+        params: { value: "synthetic" },
+      }, { sessionId: "session-intervening", toolCallId: "tool-1" }), undefined);
+      assert.equal(await hook(env, "subagent_ended")({
+        childSessionId: "synthetic-child",
+        finalOutput: "synthetic lifecycle output",
+      }, {}), undefined);
+      const second = await hook(env, "before_agent_run")(promptEvent, {});
+      assert.equal(second.outcome, "block");
+    }));
+
+  assert.deepEqual(
+    globalThis.__silmarilFirewallCalls.map((call) => call.options.metadata.eventType),
+    ["before_agent_run", "before_tool_call", "subagent_ended", "before_agent_run"],
+  );
+  assert.equal(globalThis.__silmarilFirewallCalls[0].options.requestId, undefined);
+  assert.equal(globalThis.__silmarilFirewallCalls[3].options.requestId, undefined);
 });
 
 test("plugin: missing config warns once and classifications fail open", async () => {
