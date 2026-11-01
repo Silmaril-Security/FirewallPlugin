@@ -182,15 +182,17 @@ not represented as independently verified prevention.
 
 ## Install
 
-Install the package version documented by this release:
+Version `1.2.9` includes the ID-less event-cache correction; the earlier published `1.2.8` does not. Registry installation requires this version to be published through the normal release workflow. If it is not yet available, use the source or locally packed archive flow below.
+
+Install this version after publication:
 
 ```sh
-openclaw plugins install @silmaril-security/firewall-plugin@1.2.8
+openclaw plugins install @silmaril-security/firewall-plugin@1.2.9
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
 
-The corresponding immutable GitHub release uses tag `v1.2.8`.
+Publishing this version requires a new immutable tag `v1.2.9` and the normal release workflow. Never replace an existing package version or tag.
 
 This repository also supports direct source loading and two local CLI install styles.
 
@@ -231,7 +233,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-security-firewall-plugin-1.2.8.tgz
+openclaw plugins install ./silmaril-security-firewall-plugin-1.2.9.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
