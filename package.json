@@ -24,7 +24,7 @@
     "CLAUDE.md"
   ],
   "dependencies": {
-    "@silmaril-security/sdk": "0.7.6"
+    "@silmaril-security/sdk": "0.8.2"
   },
   "devDependencies": {
     "esbuild": "0.28.0",

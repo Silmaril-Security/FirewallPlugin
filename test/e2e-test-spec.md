@@ -10,7 +10,8 @@ the response mode. With `mode` omitted, `shadowMode: true` forces Shadow even
 when `blockMalicious` is `true`. `shadowMode: false` selects Block only when
 `blockMalicious: true`; otherwise it stays Shadow.
 
-Only `prediction === "MALICIOUS"` is enforceable. Block responses are:
+An exact `prediction === "MALICIOUS"` or exact
+`governance.action === "block"` is enforceable. Block responses are:
 
 - `before_agent_run`: `{ "outcome": "block", "reason": "..." }`
 - `before_tool_call`: `{ "block": true, "blockReason": "..." }`
@@ -56,6 +57,12 @@ always returns `BENIGN`. Enforcement checks need a classifier response whose
 
 The plugin must not register wrapper tools, false-positive tools, exporters,
 queues, approval handles, or `before_message_write`.
+
+Classifier requests use typed SDK governance context. Named native tools are
+sent as flat `tool` resources; other classified hooks use the fixed `openclaw`
+agent resource. Top-level `resource` and
+`metadata.silmaril.governance.resource` must agree. The plugin must not infer an
+MCP server or synthesize an `mcp_tool` resource from a tool name or metadata.
 
 ## Required Config
 
@@ -114,8 +121,8 @@ appear only for those lifecycle hooks. `before_prompt_build` and
 `before_agent_run` share the prompt cache, and `message_sending` and
 `reply_payload_sending` share the outbound cache. The same classified text
 and conversation within five seconds reuses that classification when the
-stable event id matches, or when neither hook has one, and does not emit a
-second `result:` line, so both `result:`
+stable event id matches and does not emit a second `result:` line. ID-less
+callbacks classify independently, so both `result:`
 lines in a pair are not required on a cache hit. Hook registration and a
 running Gateway event such as `firewall-plugin: installed` stay independent
 of those cache hits.

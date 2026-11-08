@@ -14,7 +14,7 @@ agent-visible context.
 
 The package declares OpenClaw plugin API `>=2026.5.28` and minimum gateway
 version `2026.5.28` (`package.json` `openclaw.compat`). The shipped classifier
-dependency is `@silmaril-security/sdk` `0.7.6`. The manifest declares startup
+dependency pin in this source checkout is `@silmaril-security/sdk` `0.8.2`. The manifest declares startup
 activation for hook capability loading, and the runtime entry registers typed
 Gateway hooks with `api.on(...)`.
 
@@ -39,7 +39,7 @@ Hook registration is unconditional, so OpenClaw can discover and invoke the
 Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
-Enforceable hooks await `@silmaril-security/sdk` `0.7.6` with a plugin-owned
+Enforceable hooks await `@silmaril-security/sdk` `0.8.2` with a plugin-owned
 timeout. `before_prompt_build` and `before_agent_run` share one prompt
 classification for five seconds when both callbacks provide the same stable
 event ID and unchanged content. ID-less callbacks classify independently. Warn
@@ -130,6 +130,15 @@ outside that range. That value bounds each classifier request.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance` with `schema_version` `1` and harness `openclaw`. An omitted or invalid endpoint ID omits `endpoint_id`. On macOS, provenance can also include the local computer name. Classification does not wait for that lookup, and other platforms omit it.
 
+Classifier calls identify the fixed OpenClaw agent through the SDK's typed
+governance context. Tool-call and tool-response hooks with a native `toolName`
+use a canonical `tool` resource; other classified hooks use the fixed
+`openclaw` agent resource. SDK 0.8.2 serializes that resource at the request's
+top-level `resource` field and repeats the same attribution under
+`metadata.silmaril.governance`. A tool name remains a flat `tool` identity.
+The plugin does not infer an MCP server, emit an `mcp_tool` resource, or treat
+ordinary metadata as authenticated principal or resource identity.
+
 Each hook invocation classifies the current event text at most once. The plugin reads current prompt, tool, message, and lifecycle fields and does not read a transcript `messages` array. It sets `metadata.conversationId` from the child session, session, session key, or parent session, in that order. The Firewall backend owns the incremental sequence for that conversation id.
 
 Omit `mode` to use the mode on the classifier response, or set it to `shadow`,
@@ -182,7 +191,14 @@ not represented as independently verified prevention.
 
 ## Install
 
-Version `1.2.9` includes the ID-less event-cache correction; the earlier published `1.2.8` does not. Registry installation requires this version to be published through the normal release workflow. If it is not yet available, use the source or locally packed archive flow below.
+Published version `1.2.9` includes the ID-less event-cache correction; the
+earlier published `1.2.8` does not. This source checkout can contain unreleased
+changes beyond the immutable tag `v1.2.9`, including the SDK 0.8.2 integration.
+Use the source or locally packed archive flow below to validate those changes.
+Publishing them requires preparing and tagging a new plugin version; do not
+replace the existing `1.2.9` package or tag.
+If it is not yet available from the registry, validate that future prepared
+version through the source or locally packed archive flow.
 
 Install this version after publication:
 
@@ -192,7 +208,8 @@ openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
 
-Publishing this version requires a new immutable tag `v1.2.9` and the normal release workflow. Never replace an existing package version or tag.
+The command above installs the immutable published `1.2.9` artifact, not
+unreleased changes in this checkout.
 
 This repository also supports direct source loading and two local CLI install styles.
 
