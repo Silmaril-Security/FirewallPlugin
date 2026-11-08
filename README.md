@@ -191,14 +191,14 @@ not represented as independently verified prevention.
 
 ## Install
 
-The immutable published install remains `1.2.9`. This source checkout is
-prepared as `1.2.10` with SDK `0.8.2` and can be validated through the source
-or locally packed archive flows below.
+Version `1.2.10` is available from the public registry and the
+[`v1.2.10` GitHub release](https://github.com/Silmaril-Security/FirewallPlugin/releases/tag/v1.2.10).
+It ships with `@silmaril-security/sdk` `0.8.2`.
 
-Install the published version:
+Install the registry release:
 
 ```sh
-openclaw plugins install @silmaril-security/firewall-plugin@1.2.9
+openclaw plugins install @silmaril-security/firewall-plugin@1.2.10
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```

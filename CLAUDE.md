@@ -44,9 +44,9 @@ Source file: `index.ts`
 
 OpenClaw runtime entrypoint: `dist/index.js`
 
-Package and runtime attribution are prepared as `1.2.10` with
-`@silmaril-security/sdk` `0.8.2`; the published install remains `1.2.9`.
-Local archive examples below use the source package version.
+Package and runtime attribution are `1.2.10` with
+`@silmaril-security/sdk` `0.8.2`. The public registry release and local archive
+examples below both use `1.2.10`.
 
 Runtime behavior:
 
