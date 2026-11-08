@@ -193,14 +193,13 @@ not represented as independently verified prevention.
 
 Published version `1.2.9` includes the ID-less event-cache correction; the
 earlier published `1.2.8` does not. This source checkout can contain unreleased
-changes beyond the immutable tag `v1.2.9`, including the SDK 0.8.2 integration.
-Use the source or locally packed archive flow below to validate those changes.
-Publishing them requires preparing and tagging a new plugin version; do not
-replace the existing `1.2.9` package or tag.
-If it is not yet available from the registry, validate that future prepared
-version through the source or locally packed archive flow.
+changes beyond the immutable tag `v1.2.9`. Its package and runtime attribution
+are source-prepared for `1.2.10` with SDK `0.8.2`, but `1.2.10` is not yet
+independently verified as published. Use the source or locally packed archive
+flow below to validate the prepared changes. Do not replace the existing
+`1.2.9` package or tag.
 
-Install this version after publication:
+Install the current immutable published version:
 
 ```sh
 openclaw plugins install @silmaril-security/firewall-plugin@1.2.9
@@ -210,6 +209,16 @@ openclaw gateway restart
 
 The command above installs the immutable published `1.2.9` artifact, not
 unreleased changes in this checkout.
+
+The proposed future install pin `1.2.10` is:
+
+```sh
+openclaw plugins install @silmaril-security/firewall-plugin@1.2.10
+```
+
+Use that proposed pin only after publication is independently verified by the
+release coordinator. It is release-preparation documentation, not a claim that
+`1.2.10` is currently available from the registry.
 
 This repository also supports direct source loading and two local CLI install styles.
 
@@ -250,7 +259,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-security-firewall-plugin-1.2.9.tgz
+openclaw plugins install ./silmaril-security-firewall-plugin-1.2.10.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
