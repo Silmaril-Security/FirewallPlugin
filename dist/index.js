@@ -226,6 +226,7 @@ function omitUndefined(record) {
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
 var PLUGIN_VERSION = "1.2.9";
+var OPENCLAW_AGENT_ID = "openclaw";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 var MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -662,6 +663,7 @@ async function classifyHookPayload(firewall, text, meta, endpointId) {
     hook: meta.hook,
     toolName: meta.toolName,
     requestId: buildStableRequestId(meta, text),
+    governance: buildGovernanceContext(meta),
     metadata: withProvenance({
       eventType: meta.hookName,
       conversationId: meta.conversationId,
@@ -674,6 +676,14 @@ async function classifyHookPayload(firewall, text, meta, endpointId) {
     risk: describeRisk(result)
   }));
   return result;
+}
+function buildGovernanceContext(meta) {
+  const isToolBoundary = meta.hook === HookLabel.TOOL_CALL || meta.hook === HookLabel.TOOL_RESPONSE;
+  const resource = isToolBoundary && meta.toolName ? { kind: "tool", id: meta.toolName } : { kind: "agent", id: OPENCLAW_AGENT_ID };
+  return {
+    agent: OPENCLAW_AGENT_ID,
+    resource
+  };
 }
 async function classifyOnce(firewall, text, meta, cache, endpointId, now = Date.now()) {
   const key = outboundDedupeKey(meta, text);
@@ -1307,6 +1317,7 @@ var __testInternals = {
   readBoolean,
   readMode,
   classifyHookPayload,
+  buildGovernanceContext,
   classifyOnce,
   classifyOutboundOnce: classifyOnce,
   outboundDedupeKey,

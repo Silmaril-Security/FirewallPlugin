@@ -1,6 +1,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
-import type { BlockResult } from "@silmaril-security/sdk";
+import type { BlockResult, GovernanceContext } from "@silmaril-security/sdk";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -16,6 +16,7 @@ import type {
 
 const PLUGIN_ID = "firewall-plugin";
 const PLUGIN_VERSION = "1.2.9";
+const OPENCLAW_AGENT_ID = "openclaw";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
@@ -576,6 +577,7 @@ async function classifyHookPayload(
     hook: meta.hook,
     toolName: meta.toolName,
     requestId: buildStableRequestId(meta, text),
+    governance: buildGovernanceContext(meta),
     metadata: withProvenance({
       eventType: meta.hookName,
       conversationId: meta.conversationId,
@@ -588,6 +590,18 @@ async function classifyHookPayload(
     risk: describeRisk(result),
   }));
   return result;
+}
+
+function buildGovernanceContext(meta: HookLogMeta): GovernanceContext {
+  const isToolBoundary = meta.hook === HookLabel.TOOL_CALL
+    || meta.hook === HookLabel.TOOL_RESPONSE;
+  const resource = isToolBoundary && meta.toolName
+    ? { kind: "tool" as const, id: meta.toolName }
+    : { kind: "agent" as const, id: OPENCLAW_AGENT_ID };
+  return {
+    agent: OPENCLAW_AGENT_ID,
+    resource,
+  };
 }
 
 async function classifyOnce(
@@ -1408,6 +1422,7 @@ export const __testInternals = {
   readBoolean,
   readMode,
   classifyHookPayload,
+  buildGovernanceContext,
   classifyOnce,
   classifyOutboundOnce: classifyOnce,
   outboundDedupeKey,

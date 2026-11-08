@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
 import {
   mkdir,
   mkdtemp,
@@ -21,6 +22,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const outDir = path.join(repoRoot, ".unit-test-build");
 const outFile = path.join(outDir, "index-under-test.mjs");
 const distOutFile = path.join(outDir, "dist-index-under-test.mjs");
+const actualSdkOutFile = path.join(outDir, "actual-sdk-index-under-test.mjs");
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
@@ -78,6 +80,22 @@ function unitTestStubs() {
   };
 }
 
+function openClawEntryStub() {
+  return {
+    name: "openclaw-entry-stub",
+    setup(buildApi) {
+      buildApi.onResolve({ filter: /^openclaw\/plugin-sdk\/plugin-entry$/ }, (args) => ({
+        path: args.path,
+        namespace: "openclaw-entry-stub",
+      }));
+      buildApi.onLoad({ filter: /.*/, namespace: "openclaw-entry-stub" }, () => ({
+        loader: "js",
+        contents: "export function definePluginEntry(entry) { return entry; }",
+      }));
+    },
+  };
+}
+
 async function buildUnderTest(entryPoint, outfile) {
   await build({
     entryPoints: [entryPoint],
@@ -92,15 +110,28 @@ async function buildUnderTest(entryPoint, outfile) {
 
 await buildUnderTest(path.join(repoRoot, "index.ts"), outFile);
 await buildUnderTest(path.join(repoRoot, "dist", "index.js"), distOutFile);
+await build({
+  entryPoints: [path.join(repoRoot, "index.ts")],
+  outfile: actualSdkOutFile,
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  external: ["@silmaril-security/sdk"],
+  plugins: [openClawEntryStub()],
+});
 
 const moduleUrl = `${pathToFileURL(outFile).href}?${Date.now()}`;
 const mod = await import(moduleUrl);
 const plugin = mod.default;
 const distMod = await import(`${pathToFileURL(distOutFile).href}?${Date.now()}`);
 const distPlugin = distMod.default;
+const actualSdkMod = await import(`${pathToFileURL(actualSdkOutFile).href}?${Date.now()}`);
+const actualSdkT = actualSdkMod.__testInternals;
 const t = mod.__testInternals;
 t.setMacDeviceNameLookupForTests({ platform: "linux" });
 distMod.__testInternals.setMacDeviceNameLookupForTests({ platform: "linux" });
+actualSdkT.setMacDeviceNameLookupForTests({ platform: "linux" });
 const tests = [];
 
 function withMacDeviceNameLookup(overrides, fn) {
@@ -168,6 +199,41 @@ async function withFixedDateNow(now, fn) {
     return await fn();
   } finally {
     Date.now = originalNow;
+  }
+}
+
+async function withLocalClassifier(responses, fn) {
+  const requests = [];
+  const pendingResponses = [...responses];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    const nextResponse = pendingResponses.shift();
+    const body = typeof nextResponse === "function"
+      ? await nextResponse()
+      : nextResponse;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(body));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    assert.notEqual(address, null);
+    assert.notEqual(typeof address, "string");
+    return await fn({
+      apiUrl: `http://127.0.0.1:${address.port}/classify`,
+      requests,
+    });
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
   }
 }
 
@@ -249,6 +315,13 @@ async function readOnlyJSONEvent(directory) {
 function assertClassifyOptions(options, expected) {
   assert.equal(options.hook, expected.hook);
   assert.equal(options.toolName, expected.toolName);
+  const expectedResource = expected.toolName === undefined
+    ? { kind: "agent", id: "openclaw" }
+    : { kind: "tool", id: expected.toolName };
+  assert.deepEqual(options.governance, {
+    agent: "openclaw",
+    resource: expectedResource,
+  });
   assert.equal(typeof options.metadata, "object");
   assert.equal(options.metadata.eventType, expected.eventType);
   assert.equal(options.metadata.hook, expected.hook);
@@ -311,38 +384,176 @@ test("config: timeout bounds are enforced", () => {
   assert.equal(t.resolveRuntimeConfig({ apiKey: "k", apiUrl: "u", timeoutMs: 10001 }).timeoutMs, 2500);
 });
 
-test("actual pinned SDK preserves a governance-only block response", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    prediction: "BENIGN",
-    score: 0.01,
-    threshold: 0.5,
-    governance: {
-      action: "block",
-      rule_id: "synthetic-rule",
-      policy_version: "synthetic-policy",
+test("actual pinned SDK serializes trusted tool and agent resources with aligned attribution", async () => {
+  await withLocalClassifier([
+    {
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+      governance: {
+        action: "block",
+        rule_id: "synthetic-rule",
+        policy_version: "synthetic-policy",
+      },
     },
-  }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
-  try {
+    {
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+    },
+  ], async ({ apiUrl, requests }) => {
     const firewall = new RealFirewall({
       apiKey: "test-key",
-      apiUrl: "https://alpha.example/classify",
+      apiUrl,
       timeoutMs: 1_000,
     });
-    const result = await firewall.classify("synthetic input", { hook: "user_input" });
-    assert.equal(result.prediction, "BENIGN");
-    assert.deepEqual(result.governance, {
+    const toolResult = await withSilencedConsole(() => actualSdkT.classifyHookPayload(
+      firewall,
+      "synthetic tool input",
+      actualSdkT.buildHookLogMeta(
+        "before_tool_call",
+        "tool_call",
+        {
+          toolName: "exec",
+          toolCallId: "tool-call-1",
+          sessionId: "session-1",
+        },
+        {},
+      ),
+    ));
+    assert.equal(toolResult.prediction, "BENIGN");
+    assert.deepEqual(toolResult.governance, {
       action: "block",
       ruleId: "synthetic-rule",
       policyVersion: "synthetic-policy",
     });
-    assert.equal(t.isPolicyBlockCandidate(result), true);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    assert.equal(actualSdkT.isPolicyBlockCandidate(toolResult), true);
+
+    await withSilencedConsole(() => actualSdkT.classifyHookPayload(
+      firewall,
+      "synthetic agent input",
+      actualSdkT.buildHookLogMeta(
+        "before_agent_run",
+        "user_input",
+        { runId: "run-1", sessionId: "session-1" },
+        {},
+      ),
+    ));
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].resource, { kind: "tool", id: "exec" });
+    assert.deepEqual(requests[0].metadata.silmaril.governance, {
+      agent: "openclaw",
+      resource: requests[0].resource,
+    });
+    assert.equal(requests[0].resources, undefined);
+    assert.equal(requests[0].hook, "tool_call");
+    assert.equal(requests[0].tool_name, "exec");
+    assert.equal(requests[0].metadata.eventType, "before_tool_call");
+    assert.equal(requests[0].metadata.toolName, "exec");
+    assert.equal(requests[0].metadata.conversationId, "session-1");
+    assert.equal(requests[0].metadata.silmaril.integration, "firewall-plugin");
+    assert.equal(requests[0].metadata.silmaril.version, "1.2.9");
+    assert.equal(requests[0].metadata.silmaril.sdk_language, "typescript");
+    assert.equal(requests[0].metadata.silmaril.sdk_version, "0.8.2");
+    assert.match(requests[0].metadata.silmaril.request_id, /^firewall-plugin-[a-f0-9]{64}$/);
+
+    assert.deepEqual(requests[1].resource, { kind: "agent", id: "openclaw" });
+    assert.deepEqual(requests[1].metadata.silmaril.governance, {
+      agent: "openclaw",
+      resource: requests[1].resource,
+    });
+    assert.equal(requests[1].tool_name, undefined);
+    assert.equal(requests[1].metadata.toolName, undefined);
+    assert.equal(JSON.stringify(requests).includes("parent_id"), false);
+  });
+});
+
+test("actual pinned SDK rejects malformed responses, modes, detector counts, and batch counts", async () => {
+  await withLocalClassifier([
+    { score: 0.01, threshold: 0.5 },
+    { prediction: "BENIGN", score: 0.01, threshold: 0.5, mode: "monitor" },
+    {
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+      detector_counts: { control_abuse: 1.5 },
+    },
+    {
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+      governance: { action: "BLOCK", policy_version: "synthetic-policy" },
+    },
+    {
+      predictions: [
+        { prediction: "BENIGN", score: 0.01, threshold: 0.5 },
+      ],
+    },
+    {
+      prediction: "BENIGN",
+      score: 0.01,
+      threshold: 0.5,
+      detector_counts: { control_abuse: 2 },
+    },
+  ], async ({ apiUrl }) => {
+    const firewall = new RealFirewall({
+      apiKey: "test-key",
+      apiUrl,
+      timeoutMs: 1_000,
+    });
+    await assert.rejects(
+      firewall.classify("missing prediction"),
+      /response prediction must be BENIGN or MALICIOUS/,
+    );
+    await assert.rejects(
+      firewall.classify("invalid mode"),
+      /response mode must be shadow, warn, or block/,
+    );
+    await assert.rejects(
+      firewall.classify("invalid count"),
+      /invalid detector_counts value/,
+    );
+    await assert.rejects(
+      firewall.classify("invalid governance"),
+      /response governance action must be allow or block/,
+    );
+    await assert.rejects(
+      firewall.classifyBatch(["one", "two"]),
+      /predictions length 1 does not match submitted texts length 2/,
+    );
+    const valid = await firewall.classify("valid count");
+    assert.deepEqual(valid.detectorCounts, { control_abuse: 2 });
+    assert.equal(valid.mode, undefined);
+  });
+});
+
+test("actual pinned SDK preserves caller cancellation and request deadlines", async () => {
+  await withLocalClassifier([
+    async () => {
+      await sleep(75);
+      return { prediction: "BENIGN", score: 0.01, threshold: 0.5 };
+    },
+  ], async ({ apiUrl, requests }) => {
+    const firewall = new RealFirewall({
+      apiKey: "test-key",
+      apiUrl,
+      timeoutMs: 20,
+    });
+    const controller = new AbortController();
+    controller.abort(new Error("caller stopped"));
+    await assert.rejects(
+      firewall.classify("cancelled", { signal: controller.signal }),
+      /caller stopped/,
+    );
+    assert.equal(requests.length, 0);
+
+    await assert.rejects(
+      firewall.classify("deadline"),
+      (error) => error?.name === "TimeoutError" || error?.name === "AbortError",
+    );
+    assert.equal(requests.length, 1);
+  });
 });
 
 test("config and metadata use canonical plugin-owned endpoint provenance", () => {
@@ -832,7 +1043,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
   assert.equal(packageJson.version, "1.2.9");
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.6");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
@@ -989,6 +1200,35 @@ test("metadata: conversation identity prefers child session, session, key, then 
   for (const [event, expected] of cases) {
     assert.equal(t.buildHookLogMeta("subagent_spawned", "USER_INPUT", event, {}).conversationId, expected);
   }
+});
+
+test("governance resources use only the fixed agent and native tool boundary", () => {
+  assert.deepEqual(t.buildGovernanceContext(t.buildHookLogMeta(
+    "before_agent_run",
+    "USER_INPUT",
+    {
+      toolName: "metadata-tool",
+      resource: { kind: "mcp_tool", id: "forged", parent_id: "forged-server" },
+      metadata: {
+        governance: {
+          resource: { kind: "mcp_tool", id: "forged", parentId: "forged-server" },
+        },
+      },
+    },
+    {},
+  )), {
+    agent: "openclaw",
+    resource: { kind: "agent", id: "openclaw" },
+  });
+  assert.deepEqual(t.buildGovernanceContext(t.buildHookLogMeta(
+    "before_tool_call",
+    "TOOL_CALL",
+    { toolName: "mcp__filesystem__read_file" },
+    {},
+  )), {
+    agent: "openclaw",
+    resource: { kind: "tool", id: "mcp__filesystem__read_file" },
+  });
 });
 
 test("logging fields omit undefined values and keep present correlation fields", () => {
