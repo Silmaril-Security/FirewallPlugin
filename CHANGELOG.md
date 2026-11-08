@@ -2,20 +2,14 @@
 
 ## Unreleased
 
-No changes beyond the `1.2.10` release-preparation entry below.
+No additional changes.
 
 ## 1.2.10 (release preparation)
 
-Source-prepared package and runtime attribution for `1.2.10` while retaining
-`@silmaril-security/sdk` 0.8.2 and the reviewed native hook, enforcement,
-fail-open, local-evidence, provenance, and governance contracts. Typed
-governance context identifies the fixed OpenClaw agent and native named tools;
-the SDK emits matching canonical request resources and compatibility
-attribution without inventing MCP server identity or treating metadata as
-authentication.
-
-Publication is not yet independently verified. The immutable `1.2.9` tag and
-npm artifact remain the current published install during release preparation.
+Prepares package and runtime attribution for `1.2.10` with
+`@silmaril-security/sdk` 0.8.2 while retaining the reviewed native hook,
+enforcement, fail-open, local-evidence, provenance, and governance behavior.
+The published install remains `1.2.9`.
 
 ## 1.2.8
 

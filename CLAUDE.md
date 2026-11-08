@@ -44,11 +44,9 @@ Source file: `index.ts`
 
 OpenClaw runtime entrypoint: `dist/index.js`
 
-Release preparation status: package and runtime attribution are source-prepared
-for `1.2.10` with `@silmaril-security/sdk` `0.8.2`. The immutable published
-install remains `1.2.9` until the coordinator independently verifies `1.2.10`
-publication. Local archive examples below use the prepared source version and
-do not claim registry availability.
+Package and runtime attribution are prepared as `1.2.10` with
+`@silmaril-security/sdk` `0.8.2`; the published install remains `1.2.9`.
+Local archive examples below use the source package version.
 
 Runtime behavior:
 

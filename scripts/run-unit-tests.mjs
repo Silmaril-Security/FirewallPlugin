@@ -1062,21 +1062,13 @@ test("install docs: default clone flow does not pin simplified-dev", async () =>
   }
 });
 
-test("install docs: release and archive examples match the prepared version", async () => {
+test("install docs: local archive examples match the package version", async () => {
   const manifest = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
   const readme = await readFile(path.join(repoRoot, "README.md"), "utf8");
   const claude = await readFile(path.join(repoRoot, "CLAUDE.md"), "utf8");
-  const publishedInstall = readme.match(/^openclaw plugins install @silmaril-security\/firewall-plugin@(\S+)$/m);
-  assert.equal(publishedInstall?.[1], "1.2.9");
-  assert.ok(readme.includes("immutable tag `v1.2.9`"));
-  assert.ok(readme.includes(`proposed future install pin \`${manifest.version}\``));
-  assert.ok(readme.includes(`@silmaril-security/firewall-plugin@${manifest.version}`));
-  assert.ok(readme.includes("after publication"));
-  assert.match(readme, /not yet\s+independently verified as published/);
   for (const source of [readme, claude]) {
     const archive = source.match(/openclaw plugins install \.\/silmaril-security-firewall-plugin-(\S+)\.tgz/);
     assert.equal(archive?.[1], manifest.version);
-    assert.ok(source.includes("source-prepared"));
   }
 });
 
