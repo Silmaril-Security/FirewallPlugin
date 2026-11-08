@@ -453,7 +453,7 @@ test("actual pinned SDK serializes trusted tool and agent resources with aligned
     assert.equal(requests[0].metadata.toolName, "exec");
     assert.equal(requests[0].metadata.conversationId, "session-1");
     assert.equal(requests[0].metadata.silmaril.integration, "firewall-plugin");
-    assert.equal(requests[0].metadata.silmaril.version, "1.2.9");
+    assert.equal(requests[0].metadata.silmaril.version, "1.2.10");
     assert.equal(requests[0].metadata.silmaril.sdk_language, "typescript");
     assert.equal(requests[0].metadata.silmaril.sdk_version, "0.8.2");
     assert.match(requests[0].metadata.silmaril.request_id, /^firewall-plugin-[a-f0-9]{64}$/);
@@ -566,7 +566,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.9",
+      version: "1.2.10",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -1042,7 +1042,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
-  assert.equal(packageJson.version, "1.2.9");
+  assert.equal(packageJson.version, "1.2.10");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
@@ -1062,15 +1062,10 @@ test("install docs: default clone flow does not pin simplified-dev", async () =>
   }
 });
 
-test("install docs: release and archive examples match the prepared version", async () => {
+test("install docs: local archive examples match the package version", async () => {
   const manifest = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
   const readme = await readFile(path.join(repoRoot, "README.md"), "utf8");
   const claude = await readFile(path.join(repoRoot, "CLAUDE.md"), "utf8");
-  const install = readme.match(/^openclaw plugins install @silmaril-security\/firewall-plugin@(\S+)$/m);
-  assert.equal(install?.[1], manifest.version);
-  assert.ok(readme.includes(`immutable tag \`v${manifest.version}\``));
-  assert.ok(readme.includes("after publication"));
-  assert.ok(readme.includes("If it is not yet available"));
   for (const source of [readme, claude]) {
     const archive = source.match(/openclaw plugins install \.\/silmaril-security-firewall-plugin-(\S+)\.tgz/);
     assert.equal(archive?.[1], manifest.version);
@@ -2192,8 +2187,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.9",
-    pluginVersion: "1.2.9",
+    producerVersion: "1.2.10",
+    pluginVersion: "1.2.10",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -2223,7 +2218,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.9");
+  assert.equal(event.provenance.pluginVersion, "1.2.10");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -2262,8 +2257,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.9",
-      pluginVersion: "1.2.9",
+      producerVersion: "1.2.10",
+      pluginVersion: "1.2.10",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -2293,8 +2288,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.9",
-    pluginVersion: "1.2.9",
+    producerVersion: "1.2.10",
+    pluginVersion: "1.2.10",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -2463,7 +2458,7 @@ test("local evidence: governance-only observer surfaces report unavailable witho
       && event.policyDecision === "monitor"
       && event.nativeAction === "unavailable"
       && event.blockUnavailable === true
-      && event.provenance.pluginVersion === "1.2.9"
+      && event.provenance.pluginVersion === "1.2.10"
     )));
   } finally {
     if (savedDirectory === undefined) {

@@ -225,7 +225,7 @@ function omitUndefined(record) {
 
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
-var PLUGIN_VERSION = "1.2.9";
+var PLUGIN_VERSION = "1.2.10";
 var OPENCLAW_AGENT_ID = "openclaw";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;

@@ -44,6 +44,10 @@ Source file: `index.ts`
 
 OpenClaw runtime entrypoint: `dist/index.js`
 
+Package and runtime attribution are prepared as `1.2.10` with
+`@silmaril-security/sdk` `0.8.2`; the published install remains `1.2.9`.
+Local archive examples below use the source package version.
+
 Runtime behavior:
 
 - the manifest declares Gateway startup activation for OpenClaw hook capability
@@ -246,7 +250,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.9.tgz
+   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.10.tgz
    openclaw plugins enable firewall-plugin
    ```
 
