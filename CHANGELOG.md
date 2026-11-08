@@ -4,12 +4,12 @@
 
 No additional changes.
 
-## 1.2.10 (release preparation)
+## 1.2.10
 
-Prepares package and runtime attribution for `1.2.10` with
-`@silmaril-security/sdk` 0.8.2 while retaining the reviewed native hook,
-enforcement, fail-open, local-evidence, provenance, and governance behavior.
-The published install remains `1.2.9`.
+Ships package and runtime attribution with `@silmaril-security/sdk` 0.8.2 in
+the public registry and the [`v1.2.10` GitHub release](https://github.com/Silmaril-Security/FirewallPlugin/releases/tag/v1.2.10).
+Native hook, enforcement, fail-open, local-evidence, provenance, and governance
+behavior remain unchanged.
 
 ## 1.2.8
 
