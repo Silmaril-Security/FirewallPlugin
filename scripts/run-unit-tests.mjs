@@ -1764,44 +1764,46 @@ test("plugin: classifier deadlines stay unchanged while authored hook budgets ad
 test("plugin: maximum classifier timeouts fail open before both gate hook budgets expire", async () => {
   for (const hookName of ["before_agent_run", "before_tool_call"]) {
     const clock = createVirtualClock();
-    const env = registerPlugin({
-      config: {
-        apiKey: "k",
-        apiUrl: "u",
-        timeoutMs: 10000,
-        mode: "block",
-      },
-    });
-    assert.equal(globalThis.__silmarilFirewallInstances.length, 0);
-    globalThis.__silmarilFirewallClassify = async () => clock.delay(10000, () => {
-      throw Object.assign(new Error("classifier deadline expired"), { name: "TimeoutError" });
-    });
-    const entry = env.hooks.get(hookName);
-    assert.equal(entry.options.timeoutMs, 11000);
-    const event = hookName === "before_agent_run"
-      ? { prompt: "delayed prompt", runId: "deadline-run" }
-      : { toolName: "exec", params: { command: "true" } };
-    const context = hookName === "before_tool_call"
-      ? { sessionId: "deadline-session", toolCallId: "deadline-call" }
-      : {};
+    await withVirtualTimers(clock, async () => {
+      const env = registerPlugin({
+        config: {
+          apiKey: "k",
+          apiUrl: "u",
+          timeoutMs: 10000,
+          mode: "block",
+        },
+      });
+      assert.equal(globalThis.__silmarilFirewallInstances.length, 0);
+      globalThis.__silmarilFirewallClassify = async () => clock.delay(10000, () => {
+        throw Object.assign(new Error("classifier deadline expired"), { name: "TimeoutError" });
+      });
+      const entry = env.hooks.get(hookName);
+      assert.equal(entry.options.timeoutMs, 11000);
+      const event = hookName === "before_agent_run"
+        ? { prompt: "delayed prompt", runId: "deadline-run" }
+        : { toolName: "exec", params: { command: "true" } };
+      const context = hookName === "before_tool_call"
+        ? { sessionId: "deadline-session", toolCallId: "deadline-call" }
+        : {};
 
-    let settled = false;
-    const gate = withSilencedConsole(() => runGateWithHostBudget(
-      entry.handler,
-      event,
-      context,
-      entry.options.timeoutMs,
-      clock,
-    )).then((result) => {
-      settled = true;
-      return result;
+      let settled = false;
+      const gate = withSilencedConsole(() => runGateWithHostBudget(
+        entry.handler,
+        event,
+        context,
+        entry.options.timeoutMs,
+        clock,
+      )).then((result) => {
+        settled = true;
+        return result;
+      });
+      assert.equal(globalThis.__silmarilFirewallInstances[0].options.timeoutMs, 10000);
+      await clock.advanceBy(9999);
+      assert.equal(settled, false, hookName);
+      await clock.advanceBy(1);
+      assert.deepEqual(await gate, { settledBy: "handler", value: undefined }, hookName);
+      await clock.advanceBy(1000);
     });
-    assert.equal(globalThis.__silmarilFirewallInstances[0].options.timeoutMs, 10000);
-    await clock.advanceBy(9999);
-    assert.equal(settled, false, hookName);
-    await clock.advanceBy(1);
-    assert.deepEqual(await gate, { settledBy: "handler", value: undefined }, hookName);
-    await clock.advanceBy(1000);
   }
 });
 
@@ -1847,31 +1849,78 @@ test("plugin: only completed maximum-delay policy candidates block; benign and S
 
   for (const testCase of cases) {
     const clock = createVirtualClock();
+    await withVirtualTimers(clock, async () => {
+      const env = registerPlugin({
+        config: {
+          apiKey: "k",
+          apiUrl: "u",
+          timeoutMs: 10000,
+          mode: testCase.mode,
+        },
+      });
+      globalThis.__silmarilFirewallClassify = async () => clock.delay(9999, () => testCase.result);
+      const entry = env.hooks.get(testCase.hookName);
+      const event = testCase.hookName === "before_agent_run"
+        ? { prompt: "delayed completed prompt", runId: `run-${testCase.mode}` }
+        : { toolName: "exec", params: { command: "true" } };
+      let gateSettled = false;
+      const gate = withSilencedConsole(() => runGateWithHostBudget(
+        entry.handler,
+        event,
+        {},
+        entry.options.timeoutMs,
+        clock,
+      )).then((result) => {
+        gateSettled = true;
+        return result;
+      });
+      await clock.advanceBy(9998);
+      assert.equal(gateSettled, false, testCase.hookName);
+      await clock.advanceBy(1);
+      const settled = await gate;
+      assert.equal(settled.settledBy, "handler");
+      testCase.assertValue(settled.value);
+    });
+  }
+});
+
+test("plugin: near-deadline block path is sensitive to a shortened classifier deadline", async () => {
+  const clock = createVirtualClock();
+  await withVirtualTimers(clock, async () => {
     const env = registerPlugin({
       config: {
         apiKey: "k",
         apiUrl: "u",
-        timeoutMs: 10000,
-        mode: testCase.mode,
+        timeoutMs: 9998,
+        mode: "block",
       },
     });
-    globalThis.__silmarilFirewallClassify = async () => clock.delay(9999, () => testCase.result);
-    const entry = env.hooks.get(testCase.hookName);
-    const event = testCase.hookName === "before_agent_run"
-      ? { prompt: "delayed completed prompt", runId: `run-${testCase.mode}` }
-      : { toolName: "exec", params: { command: "true" } };
+    let lateCompletion = false;
+    globalThis.__silmarilFirewallClassify = async () => clock.delay(9999, () => {
+      lateCompletion = true;
+      return { prediction: "MALICIOUS", primaryOutcome: "control_abuse" };
+    });
+    const entry = env.hooks.get("before_agent_run");
+    assert.equal(entry.options.timeoutMs, 10998);
+    let gateSettled = false;
     const gate = withSilencedConsole(() => runGateWithHostBudget(
       entry.handler,
-      event,
+      { prompt: "near-deadline block", runId: "short-deadline-control" },
       {},
       entry.options.timeoutMs,
       clock,
-    ));
-    await clock.advanceBy(9999);
-    const settled = await gate;
-    assert.equal(settled.settledBy, "handler");
-    testCase.assertValue(settled.value);
-  }
+    )).then((result) => {
+      gateSettled = true;
+      return result;
+    });
+
+    await clock.advanceBy(9997);
+    assert.equal(gateSettled, false);
+    await clock.advanceBy(1);
+    assert.deepEqual(await gate, { settledBy: "handler", value: undefined });
+    await clock.advanceBy(1);
+    assert.equal(lateCompletion, true, "the malicious result arrived only after the shortened deadline");
+  });
 });
 
 test("plugin: gateway_start logs installation only", () => {
