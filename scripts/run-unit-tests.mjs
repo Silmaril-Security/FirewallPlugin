@@ -258,6 +258,7 @@ test("production entry bundles the local evidence implementation", async () => {
 
 function registerPlugin({
   config = { apiKey: "test-key", apiUrl: "https://alpha.example/classify" },
+  hostConfig,
   pluginEntry = plugin,
 } = {}) {
   resetFirewallStub();
@@ -274,6 +275,7 @@ function registerPlugin({
     },
   };
   pluginEntry.register({
+    config: hostConfig,
     pluginConfig: config,
     logger,
     on(name, handler, options) {
@@ -292,6 +294,92 @@ function hook(env, name) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createVirtualClock() {
+  let now = 0;
+  let sequence = 0;
+  const timers = [];
+
+  const setTimeout = (callback, delayMs = 0, ...args) => {
+    const timer = {
+      dueAt: now + Number(delayMs),
+      sequence: sequence++,
+      cancelled: false,
+      run() {
+        callback(...args);
+      },
+    };
+    timers.push(timer);
+    return timer;
+  };
+  const clearTimeout = (timer) => {
+    if (timer && typeof timer === "object") timer.cancelled = true;
+  };
+  const delay = (delayMs, produce = () => undefined) => new Promise((resolve, reject) => {
+    setTimeout(() => {
+      try {
+        resolve(produce());
+      } catch (error) {
+        reject(error);
+      }
+    }, delayMs);
+  });
+
+  const flushMicrotasks = async () => {
+    for (let turn = 0; turn < 12; turn += 1) {
+      await Promise.resolve();
+    }
+  };
+
+  return {
+    setTimeout,
+    clearTimeout,
+    delay,
+    pendingCount() {
+      return timers.filter((timer) => !timer.cancelled).length;
+    },
+    async advanceBy(elapsedMs) {
+      now += elapsedMs;
+      while (true) {
+        for (let index = timers.length - 1; index >= 0; index -= 1) {
+          if (timers[index].cancelled) timers.splice(index, 1);
+        }
+        timers.sort((left, right) => left.dueAt - right.dueAt || left.sequence - right.sequence);
+        const ready = timers.filter((timer) => timer.dueAt <= now);
+        if (ready.length === 0) break;
+        timers.splice(0, ready.length);
+        for (const timer of ready) {
+          if (!timer.cancelled) timer.run();
+        }
+        await flushMicrotasks();
+      }
+      await flushMicrotasks();
+    },
+  };
+}
+
+async function withVirtualTimers(clock, fn) {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = clock.setTimeout;
+  globalThis.clearTimeout = clock.clearTimeout;
+  try {
+    return await fn();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+}
+
+function runGateWithHostBudget(handler, event, context, timeoutMs, clock) {
+  const handlerResult = Promise.resolve(handler(event, context))
+    .then((value) => ({ settledBy: "handler", value }));
+  const hostTimeout = clock.delay(timeoutMs, () => ({
+    settledBy: "host_timeout",
+    value: { block: true },
+  }));
+  return Promise.race([handlerResult, hostTimeout]);
 }
 
 async function waitForJSONFiles(directory, expectedCount = 1) {
@@ -453,7 +541,7 @@ test("actual pinned SDK serializes trusted tool and agent resources with aligned
     assert.equal(requests[0].metadata.toolName, "exec");
     assert.equal(requests[0].metadata.conversationId, "session-1");
     assert.equal(requests[0].metadata.silmaril.integration, "firewall-plugin");
-    assert.equal(requests[0].metadata.silmaril.version, "1.2.10");
+    assert.equal(requests[0].metadata.silmaril.version, "1.2.11");
     assert.equal(requests[0].metadata.silmaril.sdk_language, "typescript");
     assert.equal(requests[0].metadata.silmaril.sdk_version, "0.8.2");
     assert.match(requests[0].metadata.silmaril.request_id, /^firewall-plugin-[a-f0-9]{64}$/);
@@ -556,6 +644,273 @@ test("actual pinned SDK preserves caller cancellation and request deadlines", as
   });
 });
 
+test("actual pinned SDK: one plugin deadline cancels 429 backoff without another request", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    return new Response("retry later", { status: 429 });
+  };
+  try {
+    const firewall = new RealFirewall({
+      apiKey: "test-key",
+      apiUrl: "https://firewall.invalid/classify",
+      timeoutMs: 250,
+    });
+    const classifier = actualSdkT.createBoundedClassificationClient(firewall, 250);
+    const started = performance.now();
+    await assert.rejects(
+      withSilencedConsole(() => actualSdkT.classifyHookPayload(
+        classifier,
+        "synthetic throttled payload",
+        makeMeta(),
+      )),
+      (error) => error?.name === "TimeoutError"
+        && !String(error?.message).includes("synthetic throttled payload"),
+    );
+    assert.ok(performance.now() - started < 900, "caller settles before the 1s SDK retry wait");
+    await sleep(1_100);
+    assert.equal(attempts, 1, "caller abort cancels SDK backoff before a retry");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("actual pinned SDK: deadline bounds stalled response bodies and clears timers", async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  let bodyReadStarted = false;
+  let requestSignal;
+  globalThis.fetch = async (_url, { signal }) => {
+    attempts += 1;
+    requestSignal = signal;
+    let response;
+    response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"prediction":'));
+        signal.addEventListener("abort", () => {
+          bodyReadStarted = response.bodyUsed;
+          controller.error(signal.reason);
+        }, { once: true });
+      },
+    }), { status: 200 });
+    return response;
+  };
+  try {
+    const firewall = new RealFirewall({
+      apiKey: "test-key",
+      apiUrl: "https://firewall.invalid/classify",
+      timeoutMs: 10_000,
+    });
+    const classifier = actualSdkT.createBoundedClassificationClient(firewall, 100);
+    await assert.rejects(
+      withSilencedConsole(() => actualSdkT.classifyHookPayload(
+        classifier,
+        "synthetic stalled body",
+        makeMeta(),
+      )),
+      (error) => error?.name === "TimeoutError",
+    );
+    assert.equal(attempts, 1);
+    assert.equal(bodyReadStarted, true);
+    assert.equal(requestSignal.aborted, true);
+    assert.equal(requestSignal.reason?.name, "TimeoutError");
+
+    const clock = createVirtualClock();
+    await withVirtualTimers(clock, async () => {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        prediction: "BENIGN",
+        score: 0.01,
+        threshold: 0.5,
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+      const bounded = actualSdkT.createBoundedClassificationClient(firewall, 10_000);
+      const result = await bounded.classify("synthetic immediate result", {});
+      assert.equal(result.prediction, "BENIGN");
+      assert.equal(clock.pendingCount(), 0, "SDK and plugin deadline timers are cleared");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("actual pinned SDK: maximum deadline settles both native gates before host timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const hookName of ["before_agent_run", "before_tool_call"]) {
+      const clock = createVirtualClock();
+      let attempts = 0;
+      let requestSignal;
+      let lateCompletion = false;
+      await withVirtualTimers(clock, async () => {
+        globalThis.fetch = (_url, { signal }) => {
+          attempts += 1;
+          requestSignal = signal;
+          if (hookName === "before_agent_run") {
+            return new Promise((resolve) => {
+              setTimeout(() => {
+                lateCompletion = true;
+                resolve(new Response(JSON.stringify({
+                  prediction: "MALICIOUS",
+                  score: 0.99,
+                  threshold: 0.5,
+                  primary_outcome: "control_abuse",
+                }), {
+                  status: 200,
+                  headers: { "content-type": "application/json" },
+                }));
+              }, 10_001);
+            });
+          }
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        };
+
+        const env = registerPlugin({
+          pluginEntry: actualSdkMod.default,
+          config: {
+            apiKey: "test-key",
+            apiUrl: "https://firewall.invalid/classify",
+            timeoutMs: 10_000,
+            mode: "block",
+          },
+        });
+        const entry = env.hooks.get(hookName);
+        assert.equal(entry.options.timeoutMs, 11_000);
+        const event = hookName === "before_agent_run"
+          ? { prompt: "synthetic delayed prompt", runId: "actual-sdk-deadline" }
+          : { toolName: "exec", params: { command: "true" } };
+        const context = hookName === "before_tool_call"
+          ? { sessionId: "actual-sdk-session", toolCallId: "actual-sdk-tool" }
+          : {};
+        let settled = false;
+        const gate = withSilencedConsole(() => runGateWithHostBudget(
+          entry.handler,
+          event,
+          context,
+          entry.options.timeoutMs,
+          clock,
+        )).then((result) => {
+          settled = true;
+          return result;
+        });
+
+        await clock.advanceBy(0);
+        assert.equal(attempts, 1);
+        await clock.advanceBy(9_999);
+        assert.equal(settled, false, hookName);
+        await clock.advanceBy(1);
+        assert.deepEqual(
+          await gate,
+          { settledBy: "handler", value: undefined },
+          `${hookName} must fail open at the classifier deadline`,
+        );
+        assert.equal(requestSignal.aborted, true);
+        assert.equal(requestSignal.reason?.name, "TimeoutError");
+        await clock.advanceBy(1);
+        assert.equal(
+          lateCompletion,
+          hookName === "before_agent_run",
+          "late SDK completion cannot change the settled gate",
+        );
+        await clock.advanceBy(999);
+        assert.equal(attempts, 1, `${hookName} must not retry after caller abort`);
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("actual pinned SDK: completed block decisions and pass-through modes are unchanged", async () => {
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    {
+      hookName: "before_agent_run",
+      mode: "block",
+      response: {
+        prediction: "MALICIOUS",
+        score: 0.99,
+        threshold: 0.5,
+        primary_outcome: "control_abuse",
+      },
+      assertValue(value) {
+        assert.equal(value.outcome, "block");
+      },
+    },
+    {
+      hookName: "before_tool_call",
+      mode: "block",
+      response: {
+        prediction: "BENIGN",
+        score: 0.01,
+        threshold: 0.5,
+        governance: {
+          action: "block",
+          rule_id: "synthetic-rule",
+          policy_version: "synthetic-policy",
+        },
+      },
+      assertValue(value) {
+        assert.equal(value.block, true);
+      },
+    },
+    {
+      hookName: "before_agent_run",
+      mode: "block",
+      response: { prediction: "BENIGN", score: 0.01, threshold: 0.5 },
+      assertValue(value) {
+        assert.equal(value, undefined);
+      },
+    },
+    {
+      hookName: "before_tool_call",
+      mode: "shadow",
+      response: {
+        prediction: "MALICIOUS",
+        score: 0.99,
+        threshold: 0.5,
+        primary_outcome: "control_abuse",
+      },
+      assertValue(value) {
+        assert.equal(value, undefined);
+      },
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+      const clock = createVirtualClock();
+      await withVirtualTimers(clock, async () => {
+        globalThis.fetch = async () => new Response(JSON.stringify(testCase.response), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+        const env = registerPlugin({
+          pluginEntry: actualSdkMod.default,
+          config: {
+            apiKey: "test-key",
+            apiUrl: "https://firewall.invalid/classify",
+            timeoutMs: 10_000,
+            mode: testCase.mode,
+          },
+        });
+        const event = testCase.hookName === "before_agent_run"
+          ? { prompt: "synthetic completed prompt", runId: `actual-${testCase.mode}` }
+          : { toolName: "exec", params: { command: "true" } };
+        const value = await withSilencedConsole(() => hook(env, testCase.hookName)(event, {}));
+        testCase.assertValue(value);
+        assert.equal(clock.pendingCount(), 0);
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("config and metadata use canonical plugin-owned endpoint provenance", () => {
   const endpointId = "2b64e603-f82a-4aec-9524-9736472dc80a";
   assert.equal(t.resolveRuntimeConfig({ apiKey: "key", apiUrl: "https://x", endpointId }).endpointId, endpointId);
@@ -566,7 +921,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.10",
+      version: "1.2.11",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -1042,12 +1397,13 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
-  assert.equal(packageJson.version, "1.2.10");
+  assert.equal(packageJson.version, "1.2.11");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
-  assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.5.28");
-  assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.5.28");
-  assert.equal(packageJson.openclaw.build.openclawVersion, "2026.5.28");
+  assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.8.2");
+  assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.8.2");
+  assert.equal(packageJson.openclaw.build.openclawVersion, "2026.11.2");
+  assert.equal(packageJson.openclaw.build.pluginSdkVersion, "2026.11.2");
   assert.equal(packageJson.devDependencies.esbuild, "0.28.0");
   assert.equal(packageJson.devDependencies.tsx, "4.22.3");
 });
@@ -1371,7 +1727,150 @@ test("plugin: registers startup and classifier hooks", () => {
     "tool_result_persist",
   ]);
   for (const entry of env.hooks.values()) {
-    assert.deepEqual(entry.options, { priority: 0, timeoutMs: 777 });
+    assert.deepEqual(entry.options, { priority: 0, timeoutMs: 1777 });
+    assert.equal("failureMode" in entry.options, false);
+  }
+});
+
+test("plugin: classifier deadlines stay unchanged while authored hook budgets add a bounded cleanup margin", () => {
+  assert.equal(t.pluginHookBudgetMs(250), 1250);
+  assert.equal(t.pluginHookBudgetMs(2500), 3500);
+  assert.equal(t.pluginHookBudgetMs(10000), 11000);
+  assert.equal(t.HOOK_CLEANUP_MARGIN_MS, 1000);
+  assert.equal(t.MAX_PLUGIN_HOOK_TIMEOUT_MS, 11000);
+
+  const operatorHooks = Object.freeze({
+    timeoutMs: 4321,
+    timeouts: Object.freeze({
+      before_agent_run: 5432,
+      before_tool_call: 6543,
+    }),
+  });
+  const operatorSnapshot = structuredClone(operatorHooks);
+  const env = registerPlugin({
+    config: {
+      apiKey: "k",
+      apiUrl: "u",
+      timeoutMs: 10000,
+    },
+    hostConfig: { hooks: operatorHooks },
+  });
+  for (const entry of env.hooks.values()) {
+    assert.deepEqual(entry.options, { priority: 0, timeoutMs: 11000 });
+  }
+  assert.deepEqual(operatorHooks, operatorSnapshot);
+});
+
+test("plugin: maximum classifier timeouts fail open before both gate hook budgets expire", async () => {
+  for (const hookName of ["before_agent_run", "before_tool_call"]) {
+    const clock = createVirtualClock();
+    const env = registerPlugin({
+      config: {
+        apiKey: "k",
+        apiUrl: "u",
+        timeoutMs: 10000,
+        mode: "block",
+      },
+    });
+    assert.equal(globalThis.__silmarilFirewallInstances.length, 0);
+    globalThis.__silmarilFirewallClassify = async () => clock.delay(10000, () => {
+      throw Object.assign(new Error("classifier deadline expired"), { name: "TimeoutError" });
+    });
+    const entry = env.hooks.get(hookName);
+    assert.equal(entry.options.timeoutMs, 11000);
+    const event = hookName === "before_agent_run"
+      ? { prompt: "delayed prompt", runId: "deadline-run" }
+      : { toolName: "exec", params: { command: "true" } };
+    const context = hookName === "before_tool_call"
+      ? { sessionId: "deadline-session", toolCallId: "deadline-call" }
+      : {};
+
+    let settled = false;
+    const gate = withSilencedConsole(() => runGateWithHostBudget(
+      entry.handler,
+      event,
+      context,
+      entry.options.timeoutMs,
+      clock,
+    )).then((result) => {
+      settled = true;
+      return result;
+    });
+    assert.equal(globalThis.__silmarilFirewallInstances[0].options.timeoutMs, 10000);
+    await clock.advanceBy(9999);
+    assert.equal(settled, false, hookName);
+    await clock.advanceBy(1);
+    assert.deepEqual(await gate, { settledBy: "handler", value: undefined }, hookName);
+    await clock.advanceBy(1000);
+  }
+});
+
+test("plugin: only completed maximum-delay policy candidates block; benign and Shadow results pass", async () => {
+  const cases = [
+    {
+      hookName: "before_agent_run",
+      mode: "block",
+      result: { prediction: "MALICIOUS", primaryOutcome: "control_abuse" },
+      assertValue(value) {
+        assert.equal(value.outcome, "block");
+      },
+    },
+    {
+      hookName: "before_tool_call",
+      mode: "block",
+      result: {
+        prediction: "BENIGN",
+        primaryOutcome: "benign",
+        governance: { action: "block", policyVersion: "fixture" },
+      },
+      assertValue(value) {
+        assert.equal(value.block, true);
+      },
+    },
+    {
+      hookName: "before_agent_run",
+      mode: "block",
+      result: { prediction: "BENIGN", primaryOutcome: "benign" },
+      assertValue(value) {
+        assert.equal(value, undefined);
+      },
+    },
+    {
+      hookName: "before_tool_call",
+      mode: "shadow",
+      result: { prediction: "MALICIOUS", primaryOutcome: "control_abuse" },
+      assertValue(value) {
+        assert.equal(value, undefined);
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const clock = createVirtualClock();
+    const env = registerPlugin({
+      config: {
+        apiKey: "k",
+        apiUrl: "u",
+        timeoutMs: 10000,
+        mode: testCase.mode,
+      },
+    });
+    globalThis.__silmarilFirewallClassify = async () => clock.delay(9999, () => testCase.result);
+    const entry = env.hooks.get(testCase.hookName);
+    const event = testCase.hookName === "before_agent_run"
+      ? { prompt: "delayed completed prompt", runId: `run-${testCase.mode}` }
+      : { toolName: "exec", params: { command: "true" } };
+    const gate = withSilencedConsole(() => runGateWithHostBudget(
+      entry.handler,
+      event,
+      {},
+      entry.options.timeoutMs,
+      clock,
+    ));
+    await clock.advanceBy(9999);
+    const settled = await gate;
+    assert.equal(settled.settledBy, "handler");
+    testCase.assertValue(settled.value);
   }
 });
 
@@ -2187,8 +2686,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.10",
-    pluginVersion: "1.2.10",
+    producerVersion: "1.2.11",
+    pluginVersion: "1.2.11",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -2218,7 +2717,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.10");
+  assert.equal(event.provenance.pluginVersion, "1.2.11");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -2257,8 +2756,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.10",
-      pluginVersion: "1.2.10",
+      producerVersion: "1.2.11",
+      pluginVersion: "1.2.11",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -2288,8 +2787,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.10",
-    pluginVersion: "1.2.10",
+    producerVersion: "1.2.11",
+    pluginVersion: "1.2.11",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -2458,7 +2957,7 @@ test("local evidence: governance-only observer surfaces report unavailable witho
       && event.policyDecision === "monitor"
       && event.nativeAction === "unavailable"
       && event.blockUnavailable === true
-      && event.provenance.pluginVersion === "1.2.10"
+      && event.provenance.pluginVersion === "1.2.11"
     )));
   } finally {
     if (savedDirectory === undefined) {

@@ -1,6 +1,10 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
-import type { BlockResult, GovernanceContext } from "@silmaril-security/sdk";
+import type {
+  BlockResult,
+  ClassifyOptions,
+  GovernanceContext,
+} from "@silmaril-security/sdk";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -15,12 +19,14 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.2.10";
+const PLUGIN_VERSION = "1.2.11";
 const OPENCLAW_AGENT_ID = "openclaw";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 const MIN_CLASSIFY_TIMEOUT_MS = 250;
 const MAX_CLASSIFY_TIMEOUT_MS = 10000;
+const HOOK_CLEANUP_MARGIN_MS = 1000;
+const MAX_PLUGIN_HOOK_TIMEOUT_MS = MAX_CLASSIFY_TIMEOUT_MS + HOOK_CLEANUP_MARGIN_MS;
 const OUTBOUND_DEDUPE_TTL_MS = 5000;
 const MAX_OUTBOUND_DEDUPE_ENTRIES = 256;
 const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
@@ -45,12 +51,19 @@ type RuntimeConfig = {
 };
 
 type RuntimeState = {
-  firewall: Firewall;
+  classifier: ClassificationClient;
 };
 
 type RuntimeClient = {
   config: RuntimeConfig;
   state: RuntimeState;
+};
+
+type ClassificationClient = {
+  classify(
+    text: string,
+    options: Omit<ClassifyOptions, "signal">,
+  ): Promise<BlockResult>;
 };
 
 type HookLogMeta = {
@@ -100,12 +113,15 @@ export default definePluginEntry({
   description: "Passes OpenClaw hook payloads to Silmaril and renders readable blocked-decision feedback",
   register(api) {
     startMacDeviceNameLookup();
-    const registrationTimeoutMs = readIntegerInRange(
+    const classifierTimeoutMs = readIntegerInRange(
       readRecord(api.pluginConfig)?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
       MAX_CLASSIFY_TIMEOUT_MS,
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS;
-    const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
+    const hookOptions = {
+      priority: 0,
+      timeoutMs: pluginHookBudgetMs(classifierTimeoutMs),
+    };
     let missingConfigWarned = false;
     let runtimeClient: RuntimeClient | undefined;
     const outboundClassificationCache = new Map<string, OutboundCacheEntry>();
@@ -130,14 +146,7 @@ export default definePluginEntry({
         agentInputClassificationCache.clear();
         runtimeClient = {
           config,
-          state: {
-            firewall: new Firewall({
-              apiKey: config.apiKey,
-              apiUrl: config.apiUrl,
-              timeoutMs: config.timeoutMs,
-              ...(config.mode ? { mode: config.mode } : {}),
-            }),
-          },
+          state: createRuntimeState(config),
         };
       }
 
@@ -164,7 +173,7 @@ export default definePluginEntry({
           return;
         }
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           agentInputClassificationCache,
@@ -209,7 +218,7 @@ export default definePluginEntry({
         }
 
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           agentInputClassificationCache,
@@ -237,7 +246,7 @@ export default definePluginEntry({
       try {
         const runtimeConfig = runtime.config;
         const text = safeStringify(event?.params ?? {});
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         if (shouldBlockClassification(runtimeConfig, result)) {
           emitOpenClawLocalEvidence(
             meta,
@@ -280,7 +289,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -302,7 +311,7 @@ export default definePluginEntry({
           return;
         }
 
-        void classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId)
+        void classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId)
           .then((result) => {
             emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
           })
@@ -329,7 +338,7 @@ export default definePluginEntry({
 
         const runtimeConfig = runtime.config;
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           outboundClassificationCache,
@@ -364,7 +373,7 @@ export default definePluginEntry({
         }
 
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           outboundClassificationCache,
@@ -410,7 +419,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -432,7 +441,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -454,7 +463,7 @@ export default definePluginEntry({
           return;
         }
 
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -469,6 +478,81 @@ function sameRuntimeConfig(left: RuntimeConfig, right: RuntimeConfig): boolean {
     && left.timeoutMs === right.timeoutMs
     && left.mode === right.mode
     && left.endpointId === right.endpointId;
+}
+
+function createRuntimeState(config: RuntimeConfig): RuntimeState {
+  const firewall = new Firewall({
+    apiKey: config.apiKey,
+    apiUrl: config.apiUrl,
+    timeoutMs: config.timeoutMs,
+    ...(config.mode ? { mode: config.mode } : {}),
+  });
+  return {
+    classifier: createBoundedClassificationClient(firewall, config.timeoutMs),
+  };
+}
+
+function createBoundedClassificationClient(
+  firewall: Firewall,
+  timeoutMs: number,
+): ClassificationClient {
+  return {
+    classify(text, options) {
+      return withClassificationDeadline(
+        timeoutMs,
+        (signal) => firewall.classify(text, { ...options, signal }),
+      );
+    },
+  };
+}
+
+/** Bound the complete SDK retry, backoff, and body-handling lifecycle. */
+function withClassificationDeadline<T>(
+  timeoutMs: number,
+  classify: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout>;
+
+  return new Promise<T>((resolve, reject) => {
+    const settle = (
+      finish: (value: T | PromiseLike<T>) => void,
+      value: T | PromiseLike<T>,
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      finish(value);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+
+    timer = setTimeout(() => {
+      const error = new DOMException(
+        "Silmaril classification deadline exceeded",
+        "TimeoutError",
+      );
+      controller.abort(error);
+      fail(error);
+    }, timeoutMs);
+
+    let classification: Promise<T>;
+    try {
+      classification = classify(controller.signal);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    Promise.resolve(classification).then(
+      (result) => settle(resolve, result),
+      (error) => fail(error),
+    );
+  });
 }
 
 function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig | undefined {
@@ -521,6 +605,13 @@ function readIntegerInRange(value: unknown, min: number, max: number): number | 
   return integerValue;
 }
 
+function pluginHookBudgetMs(classifierTimeoutMs: number): number {
+  return Math.min(
+    classifierTimeoutMs + HOOK_CLEANUP_MARGIN_MS,
+    MAX_PLUGIN_HOOK_TIMEOUT_MS,
+  );
+}
+
 function readBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") {
     return value;
@@ -562,7 +653,7 @@ function omitUndefined<T extends Record<string, unknown>>(record: T): Partial<T>
 }
 
 async function classifyHookPayload(
-  firewall: Firewall,
+  classifier: ClassificationClient,
   text: string,
   meta: HookLogMeta,
   endpointId?: string,
@@ -573,7 +664,7 @@ async function classifyHookPayload(
     return undefined;
   }
 
-  const result = await firewall.classify(text, {
+  const result = await classifier.classify(text, {
     hook: meta.hook,
     toolName: meta.toolName,
     requestId: buildStableRequestId(meta, text),
@@ -605,7 +696,7 @@ function buildGovernanceContext(meta: HookLogMeta): GovernanceContext {
 }
 
 async function classifyOnce(
-  firewall: Firewall,
+  classifier: ClassificationClient,
   text: string,
   meta: HookLogMeta,
   cache: Map<string, OutboundCacheEntry>,
@@ -615,7 +706,7 @@ async function classifyOnce(
   const key = outboundDedupeKey(meta, text);
   pruneOutboundCache(cache, now);
   if (!key) {
-    return classifyHookPayload(firewall, text, meta, endpointId);
+    return classifyHookPayload(classifier, text, meta, endpointId);
   }
 
   const existing = cache.get(key);
@@ -623,7 +714,7 @@ async function classifyOnce(
     return existing.result;
   }
 
-  const result = classifyHookPayload(firewall, text, meta, endpointId);
+  const result = classifyHookPayload(classifier, text, meta, endpointId);
   cache.set(key, { createdAt: now, result });
   if (cache.size > MAX_OUTBOUND_DEDUPE_ENTRIES) {
     const oldest = cache.keys().next().value;
@@ -1419,6 +1510,11 @@ export const __testInternals = {
   readRecord,
   readString,
   readIntegerInRange,
+  pluginHookBudgetMs,
+  HOOK_CLEANUP_MARGIN_MS,
+  MAX_PLUGIN_HOOK_TIMEOUT_MS,
+  createBoundedClassificationClient,
+  withClassificationDeadline,
   readBoolean,
   readMode,
   classifyHookPayload,
