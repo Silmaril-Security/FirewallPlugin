@@ -12,11 +12,16 @@ the subagent lifecycle hooks stay unchanged and record `blockUnavailable: true`
 when Block would have applied. Classifier failures fail open without adding
 agent-visible context.
 
-The package declares OpenClaw plugin API `>=2026.5.28` and minimum gateway
-version `2026.5.28` (`package.json` `openclaw.compat`). The shipped classifier
-dependency pin in this source checkout is `@silmaril-security/sdk` `0.8.2`. The manifest declares startup
-activation for hook capability loading, and the runtime entry registers typed
-Gateway hooks with `api.on(...)`.
+The package declares OpenClaw plugin API `>=2026.8.2` and minimum gateway
+version `2026.8.2` (`package.json` `openclaw.compat`). This patched security
+floor excludes affected core host lines identified by OpenClaw advisories. The
+current registration and hook contract are qualified against OpenClaw
+`2026.11.2`. The shipped classifier dependency pin in this source checkout is
+`@silmaril-security/sdk` `0.8.2`. The manifest declares startup activation for
+hook capability loading, and the runtime entry registers typed Gateway hooks
+with `api.on(...)`. Upgrade an existing OpenClaw host older than `2026.8.2`
+through its supported installation method before enabling this plugin version;
+the host rejects it below that floor.
 
 ## Runtime Hooks
 
@@ -126,7 +131,18 @@ diagnostic.
 from `250` through `10000`; for example, `"timeoutMs": 2500`. Omit it to use
 `2500`. The host validates configuration against the plugin manifest before
 loading the runtime and rejects numeric strings, fractional numbers, and values
-outside that range. That value bounds each classifier request.
+outside that range. That value remains the SDK's per-attempt timeout and is also
+the plugin-owned end-to-end deadline over all SDK attempts, retry backoff, and
+response-body handling. Deadline settlement aborts the SDK call and remains
+bounded even if underlying cleanup ignores cancellation. The plugin authors each
+OpenClaw hook budget as that classifier deadline plus a bounded `1000` ms
+cleanup margin, up to `11000` ms. This lets a classifier timeout settle through
+the plugin's fail-open catch before the host gate budget expires. OpenClaw
+operator settings retain native precedence:
+`hooks.timeouts.<hookName>` overrides `hooks.timeoutMs`, which overrides this
+plugin-authored budget. An operator can intentionally configure a shorter
+budget; OpenClaw's native timeout/error policy then applies, including
+fail-closed behavior for `before_agent_run` and `before_tool_call`.
 
 The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every classifier request carries plugin-owned `metadata.silmaril.provenance` with `schema_version` `1` and harness `openclaw`. An omitted or invalid endpoint ID omits `endpoint_id`. On macOS, provenance can also include the local computer name. Classification does not wait for that lookup, and other platforms omit it.
 
@@ -191,14 +207,13 @@ not represented as independently verified prevention.
 
 ## Install
 
-Version `1.2.10` is available from the public registry and the
-[`v1.2.10` GitHub release](https://github.com/Silmaril-Security/FirewallPlugin/releases/tag/v1.2.10).
-It ships with `@silmaril-security/sdk` `0.8.2`.
+Version `1.2.11` is the prepared package version for this release. It keeps
+`@silmaril-security/sdk` at `0.8.2`.
 
-Install the registry release:
+After `1.2.11` is published, install that exact npm registry release:
 
 ```sh
-openclaw plugins install @silmaril-security/firewall-plugin@1.2.10
+openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.11
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```
@@ -242,7 +257,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-security-firewall-plugin-1.2.10.tgz
+openclaw plugins install ./silmaril-security-firewall-plugin-1.2.11.tgz
 openclaw plugins enable firewall-plugin
 openclaw gateway restart
 ```

@@ -225,12 +225,14 @@ function omitUndefined(record) {
 
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
-var PLUGIN_VERSION = "1.2.10";
+var PLUGIN_VERSION = "1.2.11";
 var OPENCLAW_AGENT_ID = "openclaw";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
 var MIN_CLASSIFY_TIMEOUT_MS = 250;
 var MAX_CLASSIFY_TIMEOUT_MS = 1e4;
+var HOOK_CLEANUP_MARGIN_MS = 1e3;
+var MAX_PLUGIN_HOOK_TIMEOUT_MS = MAX_CLASSIFY_TIMEOUT_MS + HOOK_CLEANUP_MARGIN_MS;
 var OUTBOUND_DEDUPE_TTL_MS = 5e3;
 var MAX_OUTBOUND_DEDUPE_ENTRIES = 256;
 var MAC_DEVICE_NAME_TIMEOUT_MS = 100;
@@ -250,12 +252,15 @@ var index_default = definePluginEntry({
   description: "Passes OpenClaw hook payloads to Silmaril and renders readable blocked-decision feedback",
   register(api) {
     startMacDeviceNameLookup();
-    const registrationTimeoutMs = readIntegerInRange(
+    const classifierTimeoutMs = readIntegerInRange(
       readRecord(api.pluginConfig)?.timeoutMs,
       MIN_CLASSIFY_TIMEOUT_MS,
       MAX_CLASSIFY_TIMEOUT_MS
     ) ?? DEFAULT_CLASSIFY_TIMEOUT_MS;
-    const hookOptions = { priority: 0, timeoutMs: registrationTimeoutMs };
+    const hookOptions = {
+      priority: 0,
+      timeoutMs: pluginHookBudgetMs(classifierTimeoutMs)
+    };
     let missingConfigWarned = false;
     let runtimeClient;
     const outboundClassificationCache = /* @__PURE__ */ new Map();
@@ -278,14 +283,7 @@ var index_default = definePluginEntry({
         agentInputClassificationCache.clear();
         runtimeClient = {
           config,
-          state: {
-            firewall: new Firewall({
-              apiKey: config.apiKey,
-              apiUrl: config.apiUrl,
-              timeoutMs: config.timeoutMs,
-              ...config.mode ? { mode: config.mode } : {}
-            })
-          }
+          state: createRuntimeState(config)
         };
       }
       return runtimeClient;
@@ -308,7 +306,7 @@ var index_default = definePluginEntry({
           return;
         }
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           agentInputClassificationCache,
@@ -350,7 +348,7 @@ var index_default = definePluginEntry({
           return;
         }
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           agentInputClassificationCache,
@@ -376,7 +374,7 @@ var index_default = definePluginEntry({
       try {
         const runtimeConfig = runtime.config;
         const text = safeStringify(event?.params ?? {});
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         if (shouldBlockClassification(runtimeConfig, result)) {
           emitOpenClawLocalEvidence(
             meta,
@@ -416,7 +414,7 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -435,7 +433,7 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        void classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId).then((result) => {
+        void classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId).then((result) => {
           emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
         }).catch((err) => logError(meta, err));
       } catch (err) {
@@ -457,7 +455,7 @@ var index_default = definePluginEntry({
         }
         const runtimeConfig = runtime.config;
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           outboundClassificationCache,
@@ -489,7 +487,7 @@ var index_default = definePluginEntry({
           return;
         }
         const result = await classifyOnce(
-          runtime.state.firewall,
+          runtime.state.classifier,
           text,
           meta,
           outboundClassificationCache,
@@ -531,7 +529,7 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -550,7 +548,7 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -569,7 +567,7 @@ var index_default = definePluginEntry({
           logSkipped(meta, "empty_payload");
           return;
         }
-        const result = await classifyHookPayload(runtime.state.firewall, text, meta, runtime.config.endpointId);
+        const result = await classifyHookPayload(runtime.state.classifier, text, meta, runtime.config.endpointId);
         emitOpenClawLocalEvidence(meta, text, result, runtime.config, "allowed", false);
       } catch (err) {
         logError(meta, err);
@@ -579,6 +577,65 @@ var index_default = definePluginEntry({
 });
 function sameRuntimeConfig(left, right) {
   return left.apiKey === right.apiKey && left.apiUrl === right.apiUrl && left.timeoutMs === right.timeoutMs && left.mode === right.mode && left.endpointId === right.endpointId;
+}
+function createRuntimeState(config) {
+  const firewall = new Firewall({
+    apiKey: config.apiKey,
+    apiUrl: config.apiUrl,
+    timeoutMs: config.timeoutMs,
+    ...config.mode ? { mode: config.mode } : {}
+  });
+  return {
+    classifier: createBoundedClassificationClient(firewall, config.timeoutMs)
+  };
+}
+function createBoundedClassificationClient(firewall, timeoutMs) {
+  return {
+    classify(text, options) {
+      return withClassificationDeadline(
+        timeoutMs,
+        (signal) => firewall.classify(text, { ...options, signal })
+      );
+    }
+  };
+}
+function withClassificationDeadline(timeoutMs, classify) {
+  const controller = new AbortController();
+  let settled = false;
+  let timer;
+  return new Promise((resolve, reject) => {
+    const settle = (finish, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      finish(value);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+    timer = setTimeout(() => {
+      const error = new DOMException(
+        "Silmaril classification deadline exceeded",
+        "TimeoutError"
+      );
+      controller.abort(error);
+      fail(error);
+    }, timeoutMs);
+    let classification;
+    try {
+      classification = classify(controller.signal);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    Promise.resolve(classification).then(
+      (result) => settle(resolve, result),
+      (error) => fail(error)
+    );
+  });
 }
 function resolveRuntimeConfig(rawConfig) {
   const config = readRecord(rawConfig);
@@ -620,6 +677,12 @@ function readIntegerInRange(value, min, max) {
   }
   return integerValue;
 }
+function pluginHookBudgetMs(classifierTimeoutMs) {
+  return Math.min(
+    classifierTimeoutMs + HOOK_CLEANUP_MARGIN_MS,
+    MAX_PLUGIN_HOOK_TIMEOUT_MS
+  );
+}
 function readBoolean(value) {
   if (typeof value === "boolean") {
     return value;
@@ -653,13 +716,13 @@ function omitUndefined2(record) {
     Object.entries(record).filter((entry) => entry[1] !== void 0)
   );
 }
-async function classifyHookPayload(firewall, text, meta, endpointId) {
+async function classifyHookPayload(classifier, text, meta, endpointId) {
   const trimmed = text.trim();
   if (!trimmed) {
     logSkipped(meta, "empty_payload");
     return void 0;
   }
-  const result = await firewall.classify(text, {
+  const result = await classifier.classify(text, {
     hook: meta.hook,
     toolName: meta.toolName,
     requestId: buildStableRequestId(meta, text),
@@ -685,17 +748,17 @@ function buildGovernanceContext(meta) {
     resource
   };
 }
-async function classifyOnce(firewall, text, meta, cache, endpointId, now = Date.now()) {
+async function classifyOnce(classifier, text, meta, cache, endpointId, now = Date.now()) {
   const key = outboundDedupeKey(meta, text);
   pruneOutboundCache(cache, now);
   if (!key) {
-    return classifyHookPayload(firewall, text, meta, endpointId);
+    return classifyHookPayload(classifier, text, meta, endpointId);
   }
   const existing = cache.get(key);
   if (existing && now - existing.createdAt <= OUTBOUND_DEDUPE_TTL_MS) {
     return existing.result;
   }
-  const result = classifyHookPayload(firewall, text, meta, endpointId);
+  const result = classifyHookPayload(classifier, text, meta, endpointId);
   cache.set(key, { createdAt: now, result });
   if (cache.size > MAX_OUTBOUND_DEDUPE_ENTRIES) {
     const oldest = cache.keys().next().value;
@@ -1314,6 +1377,11 @@ var __testInternals = {
   readRecord,
   readString,
   readIntegerInRange,
+  pluginHookBudgetMs,
+  HOOK_CLEANUP_MARGIN_MS,
+  MAX_PLUGIN_HOOK_TIMEOUT_MS,
+  createBoundedClassificationClient,
+  withClassificationDeadline,
   readBoolean,
   readMode,
   classifyHookPayload,

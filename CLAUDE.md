@@ -44,9 +44,9 @@ Source file: `index.ts`
 
 OpenClaw runtime entrypoint: `dist/index.js`
 
-Package and runtime attribution are `1.2.10` with
-`@silmaril-security/sdk` `0.8.2`. The public registry release and local archive
-examples below both use `1.2.10`.
+Prepared package and runtime attribution are `1.2.11` with
+`@silmaril-security/sdk` `0.8.2`. The post-publication registry and local
+archive examples below both use `1.2.11`.
 
 Runtime behavior:
 
@@ -90,6 +90,13 @@ Runtime behavior:
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
   hook runs
+- the configured classifier timeout is also a plugin-owned end-to-end deadline
+  over all SDK attempts, retry backoff, and response-body handling. The SDK
+  receives its caller abort signal and retains the same per-attempt timeout
+- plugin-authored hook budgets add a bounded 1000 ms cleanup margin to the
+  classifier timeout, up to 11000 ms. OpenClaw hook-specific and plugin-wide
+  operator timeout overrides retain native precedence and may intentionally be
+  shorter
 - Shadow adds no agent-visible context. Warn can prepend the fixed
   `before_prompt_build` warning. The plugin adds no system or developer context
 - no wrapper tools, exporters, or queues are registered
@@ -110,7 +117,10 @@ Configuration fields:
 - `timeoutMs`: optional classifier timeout in milliseconds. OpenClaw plugin
   configuration accepts JSON integers from `250` through `10000`; omission uses
   `2500`. The host validates the manifest schema before runtime loading and
-  rejects numeric strings, fractional numbers, and out-of-range values
+  rejects numeric strings, fractional numbers, and out-of-range values. This
+  value remains the SDK per-attempt timeout and is also the plugin's overall
+  classification deadline. The plugin-authored host hook budget is the deadline
+  plus a bounded 1000 ms cleanup margin
 - `mode`: optional `shadow`, `warn`, or `block` override. A set value wins over
   the legacy booleans below and over `mode` on the classifier response
 - `shadowMode`: legacy flag. `true` forces Shadow, including when
@@ -151,6 +161,10 @@ for direct source loading or the CLI install path is unavailable.
    npm install -g openclaw
    openclaw --version
    ```
+
+   Existing OpenClaw installations older than `2026.8.2` must be upgraded
+   through their supported installation method before this plugin version is
+   enabled.
 
 3. Initialize OpenClaw local state:
 
@@ -231,6 +245,13 @@ for direct source loading or the CLI install path is unavailable.
    Use these only when the user explicitly asks for a different install style or
    when `openclaw plugins install -l .` is unavailable.
 
+   Exact npm registry flow after publication:
+
+   ```sh
+   openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.11
+   openclaw plugins enable firewall-plugin
+   ```
+
    Direct source checkout flow: register the checkout through
    `plugins.load.paths` instead of using the CLI install command.
 
@@ -250,7 +271,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.10.tgz
+   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.11.tgz
    openclaw plugins enable firewall-plugin
    ```
 
