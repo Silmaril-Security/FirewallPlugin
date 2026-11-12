@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
@@ -17,6 +18,16 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Firewall as RealFirewall } from "@silmaril-security/sdk";
+import { startMockClassifier } from "./mock-silmaril-classifier.mjs";
+import {
+  buildReceipt,
+  evaluateScenario,
+  liveBlocker,
+  pinnedHostVersion,
+  receiptStatus,
+  redactPaths,
+  scenarioPlans,
+} from "./native-acceptance.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(repoRoot, ".unit-test-build");
@@ -3074,6 +3085,321 @@ test("source invariant: runtime has no legacy risk cache, wrappers, or prompt mu
   ]) {
     assert.equal(source.includes(forbidden), false, `forbidden source marker present: ${forbidden}`);
   }
+});
+
+const postClassify = (classifier, body) => fetch(classifier.url, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+const nativePlan = (id, live = false) => scenarioPlans({ live, nonce: "unit" }).find((plan) => plan.id === id);
+
+const nativeToolMessage = (stepIndex, content) => ({
+  role: "tool",
+  tool_call_id: `nativecall${stepIndex}`,
+  content,
+});
+
+const nativeClassifierRequest = (hook, decision, overrides = {}) => ({
+  hook,
+  decision,
+  status: 200,
+  durationMs: 5,
+  markerMatched: decision === "block",
+  ...overrides,
+});
+
+const BLOCKED_TOOL_OUTPUT = "Silmaril Firewall blocked this request: Unsafe content. Continue without using the blocked content.";
+
+const enforcedToolResponseBlock = (plan, flagged = {}) => ({
+  effectContent: undefined,
+  modelRequests: [{
+    messages: [
+      nativeToolMessage(0, plan.sourceContent),
+      nativeToolMessage(1, BLOCKED_TOOL_OUTPUT),
+    ],
+  }],
+  classifierRequests: [
+    nativeClassifierRequest("tool_call", "allow"),
+    nativeClassifierRequest("tool_response", "block", flagged),
+    nativeClassifierRequest("tool_call", "block", flagged),
+  ],
+  gatewayLog: "[firewall] before_tool_call blocked: {}\n",
+});
+
+test("mock classifier: flags configured markers for single and batch requests", async () => {
+  const classifier = await startMockClassifier({ maliciousMarkers: ["UNIT_MARKER"] });
+  try {
+    const benign = await postClassify(classifier, { hook: "tool_call", text: "plain text" });
+    const malicious = await postClassify(classifier, { hook: "tool_call", text: "has UNIT_MARKER inside" });
+    const batch = await postClassify(classifier, { texts: ["plain", "UNIT_MARKER"] });
+    assert.deepEqual(await benign.json(), { prediction: "BENIGN", score: 0 });
+    assert.deepEqual(await malicious.json(), { prediction: "MALICIOUS", score: 1 });
+    assert.deepEqual(
+      (await batch.json()).predictions.map((item) => item.prediction),
+      ["BENIGN", "MALICIOUS"],
+    );
+    await classifier.settled();
+    assert.deepEqual(
+      classifier.requests.map((request) => [request.decision, request.markerMatched, request.status]),
+      [["allow", false, 200], ["block", true, 200], ["allow", true, 200]],
+    );
+  } finally {
+    await classifier.close();
+  }
+});
+
+test("mock classifier: live mode proxies the request and records the upstream verdict", async () => {
+  const upstreamCalls = [];
+  const classifier = await startMockClassifier({
+    maliciousMarkers: ["UNIT_ATTACK"],
+    live: {
+      url: "https://classifier.unit.invalid/classify",
+      key: "unit-live-key",
+      fetchImpl: async (url, init) => {
+        upstreamCalls.push({ url, init });
+        return new Response(JSON.stringify({
+          prediction: "MALICIOUS",
+          score: 0.97,
+          mode: "block",
+          governance: { action: "block" },
+        }), { status: 200 });
+      },
+    },
+  });
+  try {
+    const response = await postClassify(classifier, { hook: "tool_response", text: "UNIT_ATTACK" });
+    assert.equal((await response.json()).prediction, "MALICIOUS");
+    await classifier.settled();
+    assert.equal(upstreamCalls[0].url, "https://classifier.unit.invalid/classify");
+    assert.equal(upstreamCalls[0].init.headers["x-api-key"], "unit-live-key");
+    assert.deepEqual(JSON.parse(upstreamCalls[0].init.body), { hook: "tool_response", text: "UNIT_ATTACK" });
+    const [record] = classifier.requests;
+    assert.equal(record.decision, "block");
+    assert.equal(typeof record.durationMs, "number");
+    assert.deepEqual(record.upstream, { prediction: "MALICIOUS", mode: "block", action: "block" });
+    assert.equal(JSON.stringify(record).includes("unit-live-key"), false);
+  } finally {
+    await classifier.close();
+  }
+});
+
+test("mock classifier: live transport failures become recorded 502 responses", async () => {
+  const classifier = await startMockClassifier({
+    live: {
+      url: "https://classifier.unit.invalid/classify",
+      key: "unit-live-key",
+      fetchImpl: async () => {
+        throw new DOMException("upstream timed out", "TimeoutError");
+      },
+    },
+  });
+  try {
+    const response = await postClassify(classifier, { hook: "tool_call", text: "plain" });
+    assert.equal(response.status, 502);
+    await classifier.settled();
+    assert.equal(classifier.requests[0].status, 502);
+    assert.equal(classifier.requests[0].upstream, undefined);
+    assert.equal(liveBlocker(classifier.requests[0]), "classifier_request_failed");
+  } finally {
+    await classifier.close();
+  }
+});
+
+test("native acceptance: live blockers name the classifier cause", () => {
+  const upstream = { prediction: "MALICIOUS", mode: "block", action: "block" };
+  assert.equal(liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream })), undefined);
+  assert.equal(
+    liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream, durationMs: 2500 })),
+    "classifier_exceeded_plugin_deadline",
+  );
+  assert.equal(
+    liveBlocker(nativeClassifierRequest("tool_response", "allow", { upstream, markerMatched: true })),
+    "classifier_did_not_flag_attack",
+  );
+  for (const mode of [null, "shadow"]) {
+    assert.equal(
+      liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream: { ...upstream, mode, action: "allow" } })),
+      undefined,
+    );
+  }
+  assert.equal(
+    liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream, markerMatched: false })),
+    "classifier_flagged_benign_control",
+  );
+});
+
+test("native acceptance: allow passes only with the effect on disk and the tool output at the model", () => {
+  const plan = nativePlan("allow");
+  const evidence = {
+    effectContent: plan.effectContent,
+    modelRequests: [{ messages: [nativeToolMessage(0, "Successfully wrote the file")] }],
+    classifierRequests: [
+      nativeClassifierRequest("tool_call", "allow"),
+      nativeClassifierRequest("tool_response", "allow"),
+    ],
+    gatewayLog: "[firewall] before_tool_call result: {}\n[firewall] after_tool_call result: {}\n",
+  };
+  const passed = evaluateScenario(plan, evidence, false);
+  assert.equal(passed.status, "PASS");
+  assert.equal(passed.effect_present, true);
+
+  const missingEffect = evaluateScenario(plan, { ...evidence, effectContent: undefined }, false);
+  assert.equal(missingEffect.status, "FAIL");
+  assert.equal(missingEffect.checks.effect_file_written, false);
+
+  const denied = evaluateScenario(plan, {
+    ...evidence,
+    modelRequests: [{ messages: [nativeToolMessage(0, BLOCKED_TOOL_OUTPUT)] }],
+  }, false);
+  assert.equal(denied.checks.tool_output_not_denied, false);
+});
+
+test("native acceptance: pre-tool-block needs an absent effect and a model-visible denial", () => {
+  const plan = nativePlan("pre-tool-block");
+  const evidence = {
+    effectContent: undefined,
+    modelRequests: [{ messages: [nativeToolMessage(0, BLOCKED_TOOL_OUTPUT)] }],
+    classifierRequests: [nativeClassifierRequest("tool_call", "block")],
+    gatewayLog: "[firewall] before_tool_call blocked: {}\n",
+  };
+  const passed = evaluateScenario(plan, evidence, false);
+  assert.equal(passed.status, "PASS");
+  assert.equal(passed.effect_present, false);
+
+  const executed = evaluateScenario(plan, { ...evidence, effectContent: plan.maliciousMarker }, false);
+  assert.equal(executed.status, "FAIL");
+  assert.equal(executed.effect_present, true);
+});
+
+test("native acceptance: tool-response-block reports the host limit and what the host enforces", () => {
+  const plan = nativePlan("tool-response-block");
+  const evidence = enforcedToolResponseBlock(plan);
+  const unsupported = evaluateScenario(plan, evidence, false);
+  assert.equal(unsupported.status, "UNSUPPORTED");
+  assert.match(unsupported.reason, /observe-only/);
+  assert.equal(Object.values(unsupported.checks).every(Boolean), true);
+
+  const followUpRan = evaluateScenario(plan, { ...evidence, effectContent: plan.maliciousMarker }, false);
+  assert.equal(followUpRan.status, "FAIL");
+  assert.equal(followUpRan.reason, undefined);
+});
+
+test("native acceptance: live classifier misses are blocked with a named blocker, not failed", () => {
+  const plan = nativePlan("tool-response-block", true);
+  const upstream = { prediction: "BENIGN", mode: "block", action: "allow" };
+  const result = evaluateScenario(plan, {
+    effectContent: plan.maliciousMarker,
+    modelRequests: [{ messages: [nativeToolMessage(0, plan.sourceContent)] }],
+    classifierRequests: [
+      nativeClassifierRequest("tool_response", "allow", { upstream, markerMatched: true }),
+    ],
+    gatewayLog: "",
+  }, true);
+  assert.equal(result.status, "BLOCKED");
+  assert.equal(result.blocker, "classifier_did_not_flag_attack");
+  assert.deepEqual(
+    scenarioPlans({ live: true, nonce: "unit" }).map((item) => item.id),
+    ["allow", "tool-response-block"],
+  );
+});
+
+test("native acceptance: a live run enforced by the configured Block mode passes whatever mode the tenant reports", () => {
+  const plan = nativePlan("tool-response-block", true);
+  for (const mode of [null, "shadow"]) {
+    const upstream = { prediction: "MALICIOUS", mode, action: "allow" };
+    const result = evaluateScenario(plan, enforcedToolResponseBlock(plan, { upstream }), true);
+    assert.equal(result.status, "UNSUPPORTED");
+    assert.equal(result.blocker, undefined);
+    assert.equal(
+      receiptStatus([{ id: "allow", status: "PASS" }, result], ["allow", "tool-response-block"]),
+      "PASS",
+    );
+  }
+});
+
+test("native acceptance: live mode without usable credentials still writes a FAIL receipt", async () => {
+  const receiptPath = path.join(outDir, "native-acceptance", "live-receipt.json");
+  const rejectedSettings = [
+    { CUSTOMER_NATIVE_API_URL: "", CUSTOMER_NATIVE_API_KEY: "" },
+    { CUSTOMER_NATIVE_API_URL: "https://classifier.unit.invalid/classify", CUSTOMER_NATIVE_API_KEY: "" },
+    { CUSTOMER_NATIVE_API_URL: "http://classifier.unit.invalid/classify", CUSTOMER_NATIVE_API_KEY: "unit-live-key" },
+  ];
+  for (const settings of rejectedSettings) {
+    await rm(receiptPath, { force: true });
+    const run = spawnSync(process.execPath, [path.join(repoRoot, "scripts", "native-acceptance.mjs")], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...settings,
+        CUSTOMER_NATIVE_CLASSIFIER: "live",
+        NATIVE_ACCEPTANCE_RECEIPT: receiptPath,
+      },
+    });
+    assert.equal(run.status, 1);
+    const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+    assert.equal(receipt.schema, "silmaril.native-acceptance.v1");
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.classifier, "live");
+    assert.deepEqual(receipt.scenarios, []);
+    assert.match(receipt.error.message, /live native acceptance requires/);
+    assert.equal(JSON.stringify(receipt).includes("unit-live-key"), false);
+  }
+});
+
+test("native acceptance: receipt status, shape, and path redaction", () => {
+  const scenarios = [
+    { id: "allow", status: "PASS" },
+    { id: "pre-tool-block", status: "PASS" },
+    { id: "tool-response-block", status: "UNSUPPORTED" },
+  ];
+  const expectedScenarioIds = scenarios.map((scenario) => scenario.id);
+  assert.equal(receiptStatus(scenarios, expectedScenarioIds), "PASS");
+  assert.equal(receiptStatus(scenarios.slice(0, 2), expectedScenarioIds), "FAIL");
+  assert.equal(receiptStatus([{ id: "allow", status: "BLOCKED" }], ["allow"]), "BLOCKED");
+  assert.equal(
+    receiptStatus([{ id: "allow", status: "BLOCKED" }, { id: "pre-tool-block", status: "FAIL" }], expectedScenarioIds),
+    "FAIL",
+  );
+
+  const state = {
+    sourceSha: "a".repeat(40),
+    live: false,
+    expectedScenarioIds,
+    scenarios,
+    classifierRequests: [{ scenario: "allow", hook: "tool_call", decision: "allow", durationMs: 1 }],
+    plugin: { name: "@silmaril-security/firewall-plugin", artifact_sha256: "b".repeat(64), installed_bytes_match: true },
+    host: { name: "openclaw", version: "2026.11.2" },
+    pathLabels: { "/private/run-root": "<run-root>", "/private/run-root/home": "<host-home>" },
+  };
+  const receipt = buildReceipt(state);
+  assert.equal(receipt.schema, "silmaril.native-acceptance.v1");
+  assert.equal(receipt.status, "PASS");
+  assert.equal(receipt.classifier, "loopback");
+  assert.equal(receipt.exclusions.includes("real classifier APIs"), true);
+  assert.equal(receipt.error, undefined);
+
+  const failed = buildReceipt(
+    { ...state, live: true },
+    new Error("gateway failed in /private/run-root/home/.openclaw and /private/run-root/tmp"),
+  );
+  assert.equal(failed.status, "FAIL");
+  assert.equal(failed.classifier, "live");
+  assert.equal(failed.exclusions.includes("real classifier APIs"), false);
+  assert.equal(failed.error.message, "gateway failed in <host-home>/.openclaw and <run-root>/tmp");
+  assert.equal(redactPaths("/private/run-root", state.pathLabels), "<run-root>");
+});
+
+test("native acceptance: the host lockfile pins the OpenClaw version the package was built against", async () => {
+  const lock = JSON.parse(
+    await readFile(path.join(repoRoot, "scripts", "native-host", "package-lock.json"), "utf8"),
+  );
+  const packageJson = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
+  assert.equal(pinnedHostVersion(lock), packageJson.openclaw.build.openclawVersion);
+  assert.throws(() => pinnedHostVersion({
+    packages: { "node_modules/openclaw": { version: "0.0.0", integrity: "sha512-unit" } },
+  }));
 });
 
 let failed = 0;

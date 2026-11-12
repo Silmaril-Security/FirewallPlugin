@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      live:
+        type: boolean
+        description: Include the native acceptance run against the customer Cascade classifier
+        default: false
+  schedule:
+    - cron: "23 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validation:
+    name: Unit tests and native acceptance
+    if: github.event_name != 'schedule' || vars.CUSTOMER_NATIVE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            scripts/native-host/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Native acceptance on the pinned OpenClaw host
+        if: github.event_name != 'pull_request'
+        env:
+          NATIVE_ACCEPTANCE_RECEIPT: ${{ runner.temp }}/native-acceptance/receipt.json
+        run: npm run test:native
+
+      - name: Native acceptance against customer Cascade
+        if: github.event_name != 'pull_request' && (inputs.live == true || vars.CUSTOMER_NATIVE_ENABLED == 'true')
+        env:
+          NATIVE_ACCEPTANCE_RECEIPT: ${{ runner.temp }}/native-acceptance/live-receipt.json
+          CUSTOMER_NATIVE_CLASSIFIER: live
+          CUSTOMER_NATIVE_API_URL: ${{ vars.CUSTOMER_API_URL }}
+          CUSTOMER_NATIVE_API_KEY: ${{ secrets.CUSTOMER_API_KEY }}
+        run: npm run test:native
+
+      - name: Upload native acceptance receipts
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-acceptance
+          path: ${{ runner.temp }}/native-acceptance/
+          if-no-files-found: error
+          retention-days: 7

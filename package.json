@@ -11,6 +11,7 @@
     "build": "node scripts/build.mjs",
     "test": "npm run build && node scripts/run-unit-tests.mjs",
     "test:unit": "npm run build && node scripts/run-unit-tests.mjs",
+    "test:native": "node scripts/native-acceptance.mjs",
     "prepack": "npm run build"
   },
   "files": [

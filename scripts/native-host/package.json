@@ -1,0 +1,7 @@
+{
+  "name": "firewall-plugin-native-host",
+  "private": true,
+  "dependencies": {
+    "openclaw": "2026.11.2"
+  }
+}
