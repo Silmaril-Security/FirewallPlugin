@@ -75,7 +75,9 @@ Block text is `Silmaril Firewall blocked this request: <risk label>. Continue wi
 | `openclaw.plugin.json` | Plugin metadata and config schema |
 | `package.json` | Package metadata, dependency list, and OpenClaw extension metadata |
 | `scripts/build.mjs` | Builds `dist/index.js` for CLI plugin installation |
-| `scripts/mock-silmaril-classifier.mjs` | Local classifier stub for manual smoke testing |
+| `scripts/mock-silmaril-classifier.mjs` | Local classifier stub for manual smoke testing and native acceptance |
+| `scripts/native-acceptance.mjs` | Installs the packed plugin into a pinned, isolated OpenClaw host and runs the Block-mode acceptance scenarios (`npm run test:native`) |
+| `scripts/native-host/` | Lockfile pinning the OpenClaw host used by native acceptance |
 | `scripts/open-playground.mjs` | Opens or prints the public Silmaril Firewall demo URL |
 | `dist/index.js` | Built plugin entrypoint used by OpenClaw's CLI install path |
 

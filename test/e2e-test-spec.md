@@ -51,9 +51,35 @@ inspecting CLI and should show `Status: loaded` plus the hooks registered in
 An actual hook event, such as `firewall-plugin: installed` in the smoke flow,
 is the running Gateway proof.
 
-The bundled mock classifier, `scripts/mock-silmaril-classifier.mjs`,
-always returns `BENIGN`. Enforcement checks need a classifier response whose
-`prediction` is `MALICIOUS`.
+The bundled mock classifier, `scripts/mock-silmaril-classifier.mjs`, returns
+`BENIGN` unless the classified text contains one of the comma-separated markers
+in `SILMARIL_CLASSIFIER_MALICIOUS_MARKERS`, in which case it returns
+`MALICIOUS`. Enforcement checks need a classifier response whose `prediction`
+is `MALICIOUS`.
+
+## Automated Native Acceptance
+
+`npm run test:native` (Node.js 24) automates this spec against the real
+OpenClaw host with no human and no paid inference. It installs the OpenClaw
+version pinned in `scripts/native-host/package-lock.json` into a private
+temporary directory with `npm ci`, packs this repository with `npm pack`,
+installs that tarball with `openclaw plugins install` into an isolated home,
+verifies the installed bytes, and runs a Gateway against a loopback scripted
+model provider and the mock classifier in Block mode. It never reads or writes
+the operator's own `~/.openclaw`.
+
+Scenarios: `allow` (the tool effect exists on disk and the tool output reaches
+the model), `pre-tool-block` (the effect is absent and the model sees the
+denial), and `tool-response-block`. OpenClaw tool result hooks are observe-only
+for external plugins, so the last scenario is reported as `UNSUPPORTED` and
+proves that the follow-up tool call carrying the flagged content is blocked.
+
+The receipt is written to `NATIVE_ACCEPTANCE_RECEIPT` (absolute path) or
+`.cache/native-acceptance/receipt.json`, also on failure. The command exits `0`
+only for `PASS`. Setting `CUSTOMER_NATIVE_CLASSIFIER=live` with
+`CUSTOMER_NATIVE_API_URL` (https) and `CUSTOMER_NATIVE_API_KEY` proxies each
+classifier request to that endpoint and runs `allow` and `tool-response-block`;
+classifier-caused failures are reported as `BLOCKED` with a named `blocker`.
 
 The plugin must not register wrapper tools, false-positive tools, exporters,
 queues, approval handles, or `before_message_write`.
