@@ -132,7 +132,6 @@ export function liveBlocker(request) {
   if (request.status !== 200) return "classifier_request_failed";
   if (request.durationMs >= CLASSIFY_DEADLINE_MS) return "classifier_exceeded_plugin_deadline";
   if (request.markerMatched && request.decision !== "block") return "classifier_did_not_flag_attack";
-  if (request.markerMatched && request.upstream.mode !== "block") return "tenant_not_in_block_mode";
   if (!request.markerMatched && request.decision === "block") return "classifier_flagged_benign_control";
   return undefined;
 }
@@ -260,8 +259,10 @@ function runChecked(command, args, options) {
   return result.stdout;
 }
 
+const running = (child) => child.exitCode === null && child.signalCode === null;
+
 function killGroup(child, signal) {
-  if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, signal);
+  if (running(child)) process.kill(-child.pid, signal);
 }
 
 function spawnHost(host, args) {
@@ -293,17 +294,15 @@ async function runHost(host, args) {
   return output.text;
 }
 
-async function startGateway(host) {
-  const gateway = spawnHost(host, ["gateway", "run"]);
+async function gatewayReady(gateway) {
   const deadline = Date.now() + GATEWAY_READY_TIMEOUT_MS;
   while (!gateway.output.text.includes(GATEWAY_READY_LINE)) {
     assert(
-      gateway.child.exitCode === null && Date.now() < deadline,
+      running(gateway.child) && Date.now() < deadline,
       `gateway did not become ready: ${gateway.output.text.slice(-2000)}`,
     );
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  return gateway;
 }
 
 async function stopGateway(gateway) {
@@ -451,6 +450,7 @@ async function runScenario(plan, { host, gateway, model, classifier, live }) {
     "--json",
   ]);
   await classifier.settled();
+  assert(running(gateway.child), `gateway exited during ${plan.id}: ${gateway.output.text.slice(-2000)}`);
   const effectPath = path.join(host.workspace, plan.effectFile);
   const classifierRequests = classifier.requests.slice(firstClassifierRequest);
   return {
@@ -517,12 +517,20 @@ async function accept(state, root, resources) {
   const inspection = await runHost(host, ["plugins", "inspect", pluginId, "--runtime"]);
   assert(inspection.includes("Status: loaded"), `${pluginId} did not load: ${inspection.slice(-2000)}`);
 
-  resources.gateway = await startGateway(host);
+  resources.gateway = spawnHost(host, ["gateway", "run"]);
+  await gatewayReady(resources.gateway);
   for (const plan of plans) {
     const { result, classifierRequests } = await runScenario(plan, { host, live: state.live, ...resources });
     state.scenarios.push(result);
     state.classifierRequests.push(...classifierRequests);
   }
+}
+
+async function release(resources, root) {
+  if (resources.gateway) await stopGateway(resources.gateway);
+  await resources.classifier?.close();
+  await resources.model?.close();
+  rmSync(root, { recursive: true, force: true });
 }
 
 async function main() {
@@ -539,20 +547,15 @@ async function main() {
   const resources = {};
   let failure;
   try {
-    await accept(state, root, resources);
+    await accept(state, root, resources).finally(() => release(resources, root));
   } catch (error) {
     failure = error;
-  } finally {
-    if (resources.gateway) await stopGateway(resources.gateway);
-    await resources.classifier?.close();
-    await resources.model?.close();
-    rmSync(root, { recursive: true, force: true });
-    const receipt = buildReceipt(state, failure);
-    mkdirSync(path.dirname(receiptPath), { recursive: true });
-    writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
-    console.log(JSON.stringify({ status: receipt.status, scenarios: receipt.scenarios }, null, 2));
-    process.exitCode = receipt.status === "PASS" ? 0 : 1;
   }
+  const receipt = buildReceipt(state, failure);
+  mkdirSync(path.dirname(receiptPath), { recursive: true });
+  writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  console.log(JSON.stringify({ status: receipt.status, scenarios: receipt.scenarios }, null, 2));
+  process.exitCode = receipt.status === "PASS" ? 0 : 1;
   if (failure) console.error(failure);
 }
 

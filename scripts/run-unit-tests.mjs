@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
@@ -3111,6 +3112,22 @@ const nativeClassifierRequest = (hook, decision, overrides = {}) => ({
 
 const BLOCKED_TOOL_OUTPUT = "Silmaril Firewall blocked this request: Unsafe content. Continue without using the blocked content.";
 
+const enforcedToolResponseBlock = (plan, flagged = {}) => ({
+  effectContent: undefined,
+  modelRequests: [{
+    messages: [
+      nativeToolMessage(0, plan.sourceContent),
+      nativeToolMessage(1, BLOCKED_TOOL_OUTPUT),
+    ],
+  }],
+  classifierRequests: [
+    nativeClassifierRequest("tool_call", "allow"),
+    nativeClassifierRequest("tool_response", "block", flagged),
+    nativeClassifierRequest("tool_call", "block", flagged),
+  ],
+  gatewayLog: "[firewall] before_tool_call blocked: {}\n",
+});
+
 test("mock classifier: flags configured markers for single and batch requests", async () => {
   const classifier = await startMockClassifier({ maliciousMarkers: ["UNIT_MARKER"] });
   try {
@@ -3201,10 +3218,12 @@ test("native acceptance: live blockers name the classifier cause", () => {
     liveBlocker(nativeClassifierRequest("tool_response", "allow", { upstream, markerMatched: true })),
     "classifier_did_not_flag_attack",
   );
-  assert.equal(
-    liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream: { ...upstream, mode: "shadow" } })),
-    "tenant_not_in_block_mode",
-  );
+  for (const mode of [null, "shadow"]) {
+    assert.equal(
+      liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream: { ...upstream, mode, action: "allow" } })),
+      undefined,
+    );
+  }
   assert.equal(
     liveBlocker(nativeClassifierRequest("tool_call", "block", { upstream, markerMatched: false })),
     "classifier_flagged_benign_control",
@@ -3256,21 +3275,7 @@ test("native acceptance: pre-tool-block needs an absent effect and a model-visib
 
 test("native acceptance: tool-response-block reports the host limit and what the host enforces", () => {
   const plan = nativePlan("tool-response-block");
-  const evidence = {
-    effectContent: undefined,
-    modelRequests: [{
-      messages: [
-        nativeToolMessage(0, plan.sourceContent),
-        nativeToolMessage(1, BLOCKED_TOOL_OUTPUT),
-      ],
-    }],
-    classifierRequests: [
-      nativeClassifierRequest("tool_call", "allow"),
-      nativeClassifierRequest("tool_response", "block"),
-      nativeClassifierRequest("tool_call", "block"),
-    ],
-    gatewayLog: "[firewall] before_tool_call blocked: {}\n",
-  };
+  const evidence = enforcedToolResponseBlock(plan);
   const unsupported = evaluateScenario(plan, evidence, false);
   assert.equal(unsupported.status, "UNSUPPORTED");
   assert.match(unsupported.reason, /observe-only/);
@@ -3298,6 +3303,49 @@ test("native acceptance: live classifier misses are blocked with a named blocker
     scenarioPlans({ live: true, nonce: "unit" }).map((item) => item.id),
     ["allow", "tool-response-block"],
   );
+});
+
+test("native acceptance: a live run enforced by the configured Block mode passes whatever mode the tenant reports", () => {
+  const plan = nativePlan("tool-response-block", true);
+  for (const mode of [null, "shadow"]) {
+    const upstream = { prediction: "MALICIOUS", mode, action: "allow" };
+    const result = evaluateScenario(plan, enforcedToolResponseBlock(plan, { upstream }), true);
+    assert.equal(result.status, "UNSUPPORTED");
+    assert.equal(result.blocker, undefined);
+    assert.equal(
+      receiptStatus([{ id: "allow", status: "PASS" }, result], ["allow", "tool-response-block"]),
+      "PASS",
+    );
+  }
+});
+
+test("native acceptance: live mode without usable credentials still writes a FAIL receipt", async () => {
+  const receiptPath = path.join(outDir, "native-acceptance", "live-receipt.json");
+  const rejectedSettings = [
+    { CUSTOMER_NATIVE_API_URL: "", CUSTOMER_NATIVE_API_KEY: "" },
+    { CUSTOMER_NATIVE_API_URL: "https://classifier.unit.invalid/classify", CUSTOMER_NATIVE_API_KEY: "" },
+    { CUSTOMER_NATIVE_API_URL: "http://classifier.unit.invalid/classify", CUSTOMER_NATIVE_API_KEY: "unit-live-key" },
+  ];
+  for (const settings of rejectedSettings) {
+    await rm(receiptPath, { force: true });
+    const run = spawnSync(process.execPath, [path.join(repoRoot, "scripts", "native-acceptance.mjs")], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...settings,
+        CUSTOMER_NATIVE_CLASSIFIER: "live",
+        NATIVE_ACCEPTANCE_RECEIPT: receiptPath,
+      },
+    });
+    assert.equal(run.status, 1);
+    const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+    assert.equal(receipt.schema, "silmaril.native-acceptance.v1");
+    assert.equal(receipt.status, "FAIL");
+    assert.equal(receipt.classifier, "live");
+    assert.deepEqual(receipt.scenarios, []);
+    assert.match(receipt.error.message, /live native acceptance requires/);
+    assert.equal(JSON.stringify(receipt).includes("unit-live-key"), false);
+  }
 });
 
 test("native acceptance: receipt status, shape, and path redaction", () => {

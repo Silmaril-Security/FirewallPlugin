@@ -80,6 +80,8 @@ only for `PASS`. Setting `CUSTOMER_NATIVE_CLASSIFIER=live` with
 `CUSTOMER_NATIVE_API_URL` (https) and `CUSTOMER_NATIVE_API_KEY` proxies each
 classifier request to that endpoint and runs `allow` and `tool-response-block`;
 classifier-caused failures are reported as `BLOCKED` with a named `blocker`.
+The harness configures `mode: "block"`, which wins over the mode on the
+classifier response, so the mode the tenant reports does not change the result.
 
 The plugin must not register wrapper tools, false-positive tools, exporters,
 queues, approval handles, or `before_message_write`.
