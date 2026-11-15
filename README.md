@@ -37,8 +37,9 @@ the host rejects it below that floor.
 | `reply_payload_sending` | `LLM_OUTPUT` | Normalized delivery payload. Block can return `{ "cancel": true }` |
 | `message_sent` | n/a | Logs content-free delivery telemetry; does not reclassify delivered content |
 | `subagent_delivery_target` | `USER_INPUT` | Subagent delivery routing payload. The handler does not return a block or cancel |
-| `subagent_spawned` | `USER_INPUT` | Subagent spawn lifecycle payload. The handler does not return a block or cancel |
-| `subagent_ended` | `LLM_OUTPUT` | Subagent completion payload. The handler does not return a block or cancel |
+| `subagent_spawned` | `USER_INPUT` | Subagent spawn lifecycle payload. The handler does not return a block, cancel, or replacement |
+| `subagent_progress` | `USER_INPUT` or `LLM_OUTPUT` | Portable child-run start/end progress. The handler does not return a block, cancel, or replacement |
+| `subagent_ended` | `LLM_OUTPUT` | Subagent completion payload. The handler does not return a block, cancel, or replacement |
 
 Hook registration is unconditional, so OpenClaw can discover and invoke the
 Gateway hooks even before classifier settings are validated. Classifier config
@@ -54,6 +55,10 @@ Block is applied by `before_agent_run` when OpenClaw invokes that hook.
 `after_tool_call`, `tool_result_persist`, and subagent lifecycle hooks classify
 for visibility and do not block. Policy-candidate Block-mode events at these
 boundaries record native action `unavailable` and `blockUnavailable: true`.
+Lifecycle classification text is bounded to 8000 characters. Spawn and
+progress events use `childSessionKey`; terminal events use `targetSessionKey`,
+which OpenClaw defines as the same child identity. `requesterSessionKey`
+remains separate parent correlation and never replaces the child identity.
 `message_sending` and `reply_payload_sending` share a five-second result when
 duplicate callbacks provide the same stable event ID and unchanged content.
 Changed content and ID-less callbacks are classified separately. Image-only and
@@ -157,7 +162,14 @@ top-level `resource` field and repeats the same attribution under
 The plugin does not infer an MCP server, emit an `mcp_tool` resource, or treat
 ordinary metadata as authenticated principal or resource identity.
 
-Each hook invocation classifies the current event text at most once. The plugin reads current prompt, tool, message, and lifecycle fields and does not read a transcript `messages` array. It sets `metadata.conversationId` from the child session, session, session key, or parent session, in that order. The Firewall backend owns the incremental sequence for that conversation id.
+Each hook invocation classifies the current event text at most once. The plugin
+reads current prompt, tool, message, and lifecycle fields and does not read a
+transcript `messages` array. For subagent hooks it sets
+`metadata.conversationId` only from the child identity:
+`targetSessionKey`, `childSessionKey`, or the legacy child session id. The
+requester/parent identity is carried separately. Other hooks retain the
+existing child session, session, session-key, then parent-session fallback.
+The Firewall backend owns the incremental sequence for that conversation id.
 
 Omit `mode` to use the mode on the classifier response, or set it to `shadow`,
 `warn`, or `block`. An explicit `mode` wins over the legacy booleans and over a
@@ -167,7 +179,8 @@ only when `blockMalicious: true`; otherwise it stays Shadow. Omitting `mode`
 and both legacy flags follows the response mode, and a response with no mode
 stays Shadow. Block returns the hook response shapes in the table above.
 The plugin does not retroactively block or replace persisted tool results.
-`subagent_spawned`, `subagent_ended`, and `subagent_delivery_target` are
+`subagent_spawned`, `subagent_progress`, `subagent_ended`, and
+`subagent_delivery_target` are
 classified for visibility. Child-agent tool calls and tool results still pass
 through `before_tool_call` and `after_tool_call` on the child execution path
 and are scanned there.
@@ -209,15 +222,14 @@ not represented as independently verified prevention.
 
 ## Install
 
-Version `1.2.11` is the prepared package version for this release. It keeps
+Version `1.2.12` is the prepared source-candidate package version. It keeps
 `@silmaril-security/sdk` at `0.8.2`.
 
-After `1.2.11` is published, install that exact npm registry release:
+After `1.2.12` is published, install that exact npm registry release:
 
 ```sh
-openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.11
+openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.12
 openclaw plugins enable firewall-plugin
-openclaw gateway restart
 ```
 
 This repository also supports direct source loading and two local CLI install styles.
@@ -238,7 +250,7 @@ editing `index.ts`:
 ```sh
 npm install
 npm run build
-openclaw gateway restart
+openclaw plugins reload firewall-plugin
 ```
 
 For OpenClaw's linked local plugin install path, build the package and install
@@ -247,9 +259,8 @@ it from the repository root:
 ```sh
 npm install
 npm run build
-openclaw plugins install -l .
+openclaw plugins install --link .
 openclaw plugins enable firewall-plugin
-openclaw gateway restart
 ```
 
 For a clean installable archive, build and pack the plugin, then install the
@@ -259,17 +270,29 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install ./silmaril-security-firewall-plugin-1.2.11.tgz
+openclaw plugins install npm-pack:./silmaril-security-firewall-plugin-1.2.12.tgz
 openclaw plugins enable firewall-plugin
-openclaw gateway restart
 ```
 
 Use `plugins.load.paths` when you want OpenClaw to load this checkout directly.
-Use `openclaw plugins install -l .` when you want OpenClaw to register this
+Use `openclaw plugins install --link .` when you want OpenClaw to register this
 checkout as a linked local plugin. Use the `.tgz` flow when you want the
 installer to consume only the packaged files listed by `package.json`. All flows
 use the same plugin id, `firewall-plugin`, and the same
 `plugins.entries.firewall-plugin.config` settings.
+
+Review the plugin's declared capabilities before accepting them. Interactive
+commands show the capability review. For noninteractive install or enable, use
+`--accept-capabilities` only after that review; a non-ClawHub source may also
+require `--force` after its source has been reviewed. Neither flag is a trust
+bypass.
+
+Plugin-management commands apply changes to a running Gateway. Source or
+manifest edits require `openclaw plugins reload firewall-plugin`; inspect its
+application receipt. Restart only when that receipt reports
+`restartRequired: true`. If the Gateway is stopped, start it so it can load the
+saved change. A successful live apply with `restartRequired: false` needs no
+restart.
 
 Inspect the installed plugin:
 
@@ -295,6 +318,7 @@ reply_payload_sending
 message_sent
 subagent_delivery_target
 subagent_spawned
+subagent_progress
 subagent_ended
 ```
 
@@ -308,6 +332,15 @@ Run diagnostics:
 
 ```sh
 openclaw --no-color plugins doctor
+openclaw gateway status --deep --require-rpc
+```
+
+Runtime inspection proves registration in the inspecting CLI, while deep
+status proves the active Gateway is reachable. Where an agent callback is
+available, invoke one and verify its sanitized hook log; for example:
+
+```sh
+openclaw agent --agent main --message "Reply with FIREWALL_PLUGIN_SMOKE_OK."
 ```
 
 ## Public Demo
@@ -348,11 +381,12 @@ For a local smoke test, start the mock classifier:
 node scripts/mock-silmaril-classifier.mjs
 ```
 
-Set the plugin `apiUrl` to the mock classifier URL printed by the script, set
-any non-empty test API key, then restart OpenClaw:
+Set the plugin `apiUrl` to the mock classifier URL printed by the script and set
+any non-empty test API key. Apply the change live. Restart only if the reload
+receipt reports `restartRequired: true`; start the Gateway if it is stopped:
 
 ```sh
-openclaw gateway restart
+openclaw plugins reload firewall-plugin
 ```
 
 Send a normal OpenClaw message, then send a message that uses at least one tool.
@@ -383,6 +417,7 @@ These lines appear only when OpenClaw invokes the subagent lifecycle hooks:
 ```text
 [firewall] subagent_delivery_target result:
 [firewall] subagent_spawned result:
+[firewall] subagent_progress result:
 [firewall] subagent_ended result:
 ```
 

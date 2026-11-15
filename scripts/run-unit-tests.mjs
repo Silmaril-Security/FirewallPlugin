@@ -552,7 +552,7 @@ test("actual pinned SDK serializes trusted tool and agent resources with aligned
     assert.equal(requests[0].metadata.toolName, "exec");
     assert.equal(requests[0].metadata.conversationId, "session-1");
     assert.equal(requests[0].metadata.silmaril.integration, "firewall-plugin");
-    assert.equal(requests[0].metadata.silmaril.version, "1.2.11");
+    assert.equal(requests[0].metadata.silmaril.version, "1.2.12");
     assert.equal(requests[0].metadata.silmaril.sdk_language, "typescript");
     assert.equal(requests[0].metadata.silmaril.sdk_version, "0.8.2");
     assert.match(requests[0].metadata.silmaril.request_id, /^firewall-plugin-[a-f0-9]{64}$/);
@@ -932,7 +932,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.11",
+      version: "1.2.12",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -1408,7 +1408,7 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
-  assert.equal(packageJson.version, "1.2.11");
+  assert.equal(packageJson.version, "1.2.12");
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.8.2");
@@ -1434,7 +1434,7 @@ test("install docs: local archive examples match the package version", async () 
   const readme = await readFile(path.join(repoRoot, "README.md"), "utf8");
   const claude = await readFile(path.join(repoRoot, "CLAUDE.md"), "utf8");
   for (const source of [readme, claude]) {
-    const archive = source.match(/openclaw plugins install \.\/silmaril-security-firewall-plugin-(\S+)\.tgz/);
+    const archive = source.match(/openclaw plugins install (?:npm-pack:)?\.\/silmaril-security-firewall-plugin-(\S+)\.tgz/);
     assert.equal(archive?.[1], manifest.version);
   }
 });
@@ -1552,15 +1552,40 @@ test("metadata: trace id can be read from traceId or trace.id", () => {
   assert.equal(t.readTraceId("no"), undefined);
 });
 
-test("metadata: conversation identity prefers child session, session, key, then parent", () => {
+test("metadata: subagent correlation keeps stable child and requester identities separate", () => {
   const cases = [
-    [{ childSessionId: "child", sessionId: "session", sessionKey: "key", parentSessionId: "parent" }, "child"],
+    [{ targetSessionKey: "child", requesterSessionKey: "parent" }, "child"],
+    [{ childSessionKey: "child", requesterSessionKey: "parent" }, "child"],
+    [{ childSessionId: "child", parentSessionId: "parent" }, "child"],
+  ];
+  for (const [event, expected] of cases) {
+    const meta = t.buildHookLogMeta("subagent_spawned", "USER_INPUT", event, {});
+    assert.equal(meta.conversationId, expected);
+  }
+  const terminal = t.buildHookLogMeta(
+    "subagent_ended",
+    "LLM_OUTPUT",
+    { targetSessionKey: "child", requesterSessionKey: "parent" },
+    {},
+  );
+  assert.equal(terminal.targetSessionKey, "child");
+  assert.equal(terminal.requesterSessionKey, "parent");
+  assert.equal(terminal.conversationId, "child");
+  assert.equal(
+    t.buildHookLogMeta(
+      "subagent_ended",
+      "LLM_OUTPUT",
+      { requesterSessionKey: "parent" },
+      {},
+    ).conversationId,
+    undefined,
+  );
+  for (const [event, expected] of [
     [{ sessionId: "session", sessionKey: "key", parentSessionId: "parent" }, "session"],
     [{ sessionKey: "key", parentSessionId: "parent" }, "key"],
     [{ parentSessionId: "parent" }, "parent"],
-  ];
-  for (const [event, expected] of cases) {
-    assert.equal(t.buildHookLogMeta("subagent_spawned", "USER_INPUT", event, {}).conversationId, expected);
+  ]) {
+    assert.equal(t.buildHookLogMeta("before_agent_run", "USER_INPUT", event, {}).conversationId, expected);
   }
 });
 
@@ -1668,11 +1693,19 @@ test("delivery and lifecycle extraction covers native OpenClaw payload shapes", 
   assert.equal(t.extractLifecycleText({ goal: "scan child prompt", traceId: "secret-trace" }), "scan child prompt");
   assert.equal(t.extractLifecycleText({ child: { id: "child-1", goal: "scan nested child prompt" } }), "scan nested child prompt");
   assert.equal(t.extractLifecycleText({ child: { id: "child-1" }, traceId: "secret-trace" }), "");
+  assert.equal(t.extractLifecycleText({ phase: "ended", outcome: "timeout" }), "ended\ntimeout");
   assert.equal(t.extractLifecycleText({
     childSummary: "current child summary",
     messages: [{ role: "user", content: "historical prompt" }],
     payload: { messages: [{ role: "assistant", content: "historical output" }] },
   }), "current child summary");
+  const boundedLifecycle = t.extractLifecycleText({
+    reason: `HEAD${"x".repeat(t.MAX_LIFECYCLE_TEXT_CHARS)}TAIL`,
+  });
+  assert.equal(boundedLifecycle.length, t.MAX_LIFECYCLE_TEXT_CHARS);
+  assert.ok(boundedLifecycle.startsWith("HEAD"));
+  assert.ok(boundedLifecycle.endsWith("TAIL"));
+  assert.ok(boundedLifecycle.includes("...[cut]..."));
   assert.equal(t.extractAgentRunText({ prompt: "current prompt", messages: ["historical prompt"] }), "current prompt");
   assert.equal(t.extractAgentRunText({ messages: ["historical prompt"] }), "");
 });
@@ -1734,6 +1767,7 @@ test("plugin: registers startup and classifier hooks", () => {
     "reply_payload_sending",
     "subagent_delivery_target",
     "subagent_ended",
+    "subagent_progress",
     "subagent_spawned",
     "tool_result_persist",
   ]);
@@ -2153,7 +2187,7 @@ test("plugin: after_tool_call scans child tool results in their execution path",
   });
 });
 
-test("plugin: message_sent is telemetry-only and subagent hooks use child identity", async () => {
+test("plugin: message_sent is telemetry-only and subagent hooks preserve stable child correlation", async () => {
   const env = registerPlugin();
   globalThis.__silmarilFirewallClassify = async () => ({
     prediction: "MALICIOUS",
@@ -2169,35 +2203,47 @@ test("plugin: message_sent is telemetry-only and subagent hooks use child identi
       message: { content: [{ text: "unsafe delivered child output" }] },
     }, {});
     await hook(env, "subagent_delivery_target")({
-      parentSessionId: "parent-session",
-      childSessionId: "child-session",
+      requesterSessionKey: "parent-session",
+      childSessionKey: "child-session",
       prompt: "unsafe child routing prompt",
     }, {});
     await hook(env, "subagent_spawned")({
-      childSessionId: "child-session",
+      childSessionKey: "child-session",
       goal: "unsafe child spawn prompt",
     }, {});
+    assert.equal(await hook(env, "subagent_progress")({
+      phase: "started",
+      runId: "child-run",
+      childSessionKey: "child-session",
+    }, { requesterSessionKey: "parent-session" }), undefined);
     await hook(env, "subagent_ended")({
-      childSessionId: "child-session",
+      targetSessionKey: "child-session",
+      requesterSessionKey: "parent-session",
       finalOutput: "unsafe child final output",
     }, {});
 
     assert.deepEqual(
       globalThis.__silmarilFirewallCalls.map((call) => call.options.metadata.eventType),
-      ["subagent_delivery_target", "subagent_spawned", "subagent_ended"],
+      ["subagent_delivery_target", "subagent_spawned", "subagent_progress", "subagent_ended"],
     );
     assert.equal(globalThis.__silmarilFirewallCalls[0].options.hook, "USER_INPUT");
     assert.equal(globalThis.__silmarilFirewallCalls[1].options.hook, "USER_INPUT");
-    assert.equal(globalThis.__silmarilFirewallCalls[2].options.hook, "LLM_OUTPUT");
+    assert.equal(globalThis.__silmarilFirewallCalls[2].options.hook, "USER_INPUT");
+    assert.equal(globalThis.__silmarilFirewallCalls[3].options.hook, "LLM_OUTPUT");
     assert.ok(globalThis.__silmarilFirewallCalls[0].text.includes("unsafe child routing prompt"));
     assert.ok(globalThis.__silmarilFirewallCalls[1].text.includes("unsafe child spawn prompt"));
-    assert.ok(globalThis.__silmarilFirewallCalls[2].text.includes("unsafe child final output"));
+    assert.ok(globalThis.__silmarilFirewallCalls[2].text.includes("started"));
+    assert.ok(globalThis.__silmarilFirewallCalls[3].text.includes("unsafe child final output"));
     for (const call of globalThis.__silmarilFirewallCalls) {
       assert.equal(call.options.metadata.conversationId, "child-session");
       assert.match(call.options.requestId, /^firewall-plugin-[a-f0-9]{64}$/);
     }
+    assert.equal(globalThis.__silmarilFirewallCalls[0].options.metadata.requesterSessionKey, "parent-session");
+    assert.equal(globalThis.__silmarilFirewallCalls[3].options.metadata.targetSessionKey, "child-session");
+    assert.equal(globalThis.__silmarilFirewallCalls[3].options.metadata.requesterSessionKey, "parent-session");
     assert.ok(logs.some((line) => line.includes("[firewall] message_sent observed:")));
     assert.ok(logs.some((line) => line.includes("[firewall] subagent_spawned result:")));
+    assert.ok(logs.some((line) => line.includes("[firewall] subagent_progress result:")));
     assert.ok(logs.some((line) => line.includes("[firewall] subagent_ended result:")));
     assert.equal(logs.some((line) => line.includes("unsafe child final output")), false);
   });
@@ -2408,6 +2454,7 @@ test("plugin: Shadow is silent and preserves every supported boundary", async ()
     ["reply_payload_sending", { messageId: "m2", sessionId: "s1", payload: { text: "unsafe output" } }, {}],
     ["subagent_delivery_target", { childGoal: "unsafe goal" }, { sessionId: "s1", childSessionId: "s2" }],
     ["subagent_spawned", { childGoal: "unsafe goal" }, { sessionId: "s1", childSessionId: "s2" }],
+    ["subagent_progress", { phase: "started", childSessionKey: "s2" }, { requesterSessionKey: "s1" }],
     ["subagent_ended", { childSummary: "unsafe summary" }, { sessionId: "s1", childSessionId: "s2" }],
   ];
   await withSilencedConsole(async () => {
@@ -2746,8 +2793,8 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.11",
-    pluginVersion: "1.2.11",
+    producerVersion: "1.2.12",
+    pluginVersion: "1.2.12",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -2777,7 +2824,7 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.11");
+  assert.equal(event.provenance.pluginVersion, "1.2.12");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -2816,8 +2863,8 @@ test("local evidence: writer uses private atomic single-file publication", async
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.11",
-      pluginVersion: "1.2.11",
+      producerVersion: "1.2.12",
+      pluginVersion: "1.2.12",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -2847,8 +2894,8 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.11",
-    pluginVersion: "1.2.11",
+    producerVersion: "1.2.12",
+    pluginVersion: "1.2.12",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -3007,8 +3054,13 @@ test("local evidence: governance-only observer surfaces report unavailable witho
         childSessionId: "child-governance",
         childGoal: "governed child",
       }, { sessionId: "session-governance" }), undefined);
+      assert.equal(await hook(env, "subagent_progress")({
+        phase: "ended",
+        outcome: "error",
+        childSessionKey: "child-governance",
+      }, { requesterSessionKey: "session-governance" }), undefined);
     });
-    const files = await waitForJSONFiles(root, 2);
+    const files = await waitForJSONFiles(root, 3);
     const events = await Promise.all(
       files.map(async (file) => JSON.parse(await readFile(path.join(root, file), "utf8"))),
     );
@@ -3017,7 +3069,7 @@ test("local evidence: governance-only observer surfaces report unavailable witho
       && event.policyDecision === "monitor"
       && event.nativeAction === "unavailable"
       && event.blockUnavailable === true
-      && event.provenance.pluginVersion === "1.2.11"
+      && event.provenance.pluginVersion === "1.2.12"
     )));
   } finally {
     if (savedDirectory === undefined) {

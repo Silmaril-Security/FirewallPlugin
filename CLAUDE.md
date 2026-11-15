@@ -16,15 +16,15 @@ Allowed onboarding changes:
 - clone or update this repository
 - register this source checkout through `plugins.load.paths` in the user's
   OpenClaw config
-- install this repository through `openclaw plugins install -l .`; this is the
+- install this repository through `openclaw plugins install --link .`; this is the
   default Claude Code onboarding path
 - create an npm package tarball with `npm pack` when the user wants a clean
   installable archive
 - open or print the hosted Silmaril Firewall demo URL with
   `node scripts/open-playground.mjs`
 - add or update the `firewall-plugin` entry in the user's OpenClaw config
-- run OpenClaw diagnostics, inspect commands, gateway restarts, and manual smoke
-  tests
+- run OpenClaw diagnostics, inspect commands, conditional gateway
+  start/restarts, and manual smoke tests
 
 Do not edit files under the OpenClaw CLI installation, OpenClaw stock extension
 directories, OpenClaw package files, this plugin's source files, this plugin's
@@ -44,9 +44,9 @@ Source file: `index.ts`
 
 OpenClaw runtime entrypoint: `dist/index.js`
 
-Prepared package and runtime attribution are `1.2.11` with
+Prepared package and runtime attribution are `1.2.12` with
 `@silmaril-security/sdk` `0.8.2`. The post-publication registry and local
-archive examples below both use `1.2.11`.
+archive examples below both use `1.2.12`.
 
 Runtime behavior:
 
@@ -83,9 +83,13 @@ Runtime behavior:
   classification for five seconds only when both callbacks provide the same
   stable event ID; changed content and ID-less callbacks classify separately
 - `message_sent` emits content-free delivery telemetry without a classifier call
-- `subagent_delivery_target`, `subagent_spawned`, and `subagent_ended` classify
-  lifecycle text for visibility and log sanitized summaries without enforcement.
-  A policy-candidate Block-mode result records native action `unavailable`
+- `subagent_delivery_target`, `subagent_spawned`, `subagent_progress`, and
+  `subagent_ended` classify bounded lifecycle text for visibility and log
+  sanitized summaries without enforcement. Spawn/progress `childSessionKey`
+  and terminal `targetSessionKey` correlate one child while
+  `requesterSessionKey` remains separate parent identity. A policy-candidate
+  Block-mode result records native action `unavailable`; these observer hooks
+  never return block, cancel, or replacement shapes
 - `scripts/open-playground.mjs` opens or prints the hosted Silmaril Firewall
   demo URL without serving local UI or reading or printing classifier config
 - hook registration is unconditional; classifier config is resolved when each
@@ -143,7 +147,7 @@ Use these steps when OpenClaw is not already configured and this repository is
 not already cloned.
 
 Default install rule for Claude Code: after cloning and building this repository,
-run `openclaw plugins install -l .` from the repository root. Do not choose the
+run `openclaw plugins install --link .` from the repository root. Do not choose the
 manual `plugins.load.paths` source checkout flow unless the user explicitly asks
 for direct source loading or the CLI install path is unavailable.
 
@@ -197,13 +201,15 @@ for direct source loading or the CLI install path is unavailable.
    path for Claude Code:
 
    ```sh
-   openclaw plugins install -l .
+   openclaw plugins install --link .
    openclaw plugins enable firewall-plugin
    ```
 
-   The `-l` flag links the local checkout instead of copying it. OpenClaw reads
-   this repository's `package.json`, then loads the built entrypoint at
-   `dist/index.js`.
+   The `--link` flag links the local checkout instead of copying it. OpenClaw
+   reads this repository's `package.json`, then loads the built entrypoint at
+   `dist/index.js`. Review the declared capabilities before accepting them.
+   For noninteractive install or enable, use `--accept-capabilities` only after
+   that review; local sources may also require `--force` after source review.
 
 7. Add or update the plugin config in the user's OpenClaw config.
 
@@ -243,12 +249,12 @@ for direct source loading or the CLI install path is unavailable.
 8. Alternative install flows.
 
    Use these only when the user explicitly asks for a different install style or
-   when `openclaw plugins install -l .` is unavailable.
+   when `openclaw plugins install --link .` is unavailable.
 
    Exact npm registry flow after publication:
 
    ```sh
-   openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.11
+   openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.12
    openclaw plugins enable firewall-plugin
    ```
 
@@ -271,7 +277,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install ./silmaril-security-firewall-plugin-1.2.11.tgz
+   openclaw plugins install npm-pack:./silmaril-security-firewall-plugin-1.2.12.tgz
    openclaw plugins enable firewall-plugin
    ```
 
@@ -280,18 +286,24 @@ for direct source loading or the CLI install path is unavailable.
    Do not remove an existing source checkout registration unless the user
    explicitly asks to switch install styles.
 
-9. Restart the gateway:
+9. Apply the change to the Gateway.
 
    ```sh
-   openclaw gateway restart
+   openclaw plugins reload firewall-plugin
    ```
+
+   Plugin-management commands apply directly when the Gateway is running.
+   Inspect the reload receipt. Restart only when it reports
+   `restartRequired: true`; if the Gateway is stopped, start it to load the
+   saved change. Do not add an unconditional restart after a successful live
+   apply.
 
 10. Verify plugin load:
 
    ```sh
    openclaw --no-color plugins inspect firewall-plugin --runtime
    openclaw --no-color plugins doctor
-   openclaw --no-color gateway status
+   openclaw gateway status --deep --require-rpc
    ```
 
    Expected inspect output includes:
@@ -312,14 +324,16 @@ for direct source loading or the CLI install path is unavailable.
    message_sent
    subagent_delivery_target
    subagent_spawned
+   subagent_progress
    subagent_ended
    ```
 
    `openclaw plugins inspect firewall-plugin --runtime` loads the module in the
    inspecting CLI and reports `Status: loaded` plus the typed hooks registered
    in `index.ts`. Runtime inspection verifies those registrations in the CLI
-   process. An actual hook event, such as `firewall-plugin: installed` in the
-   smoke test below, is the running Gateway proof.
+   process, while deep status verifies the active Gateway RPC. Invoke a native
+   callback where applicable; the agent smoke below exercises prompt and
+   delivery hooks. A matching sanitized hook log is the running Gateway proof.
 
 11. Optional hosted demo walkthrough:
 
@@ -364,6 +378,13 @@ for direct source loading or the CLI install path is unavailable.
     Subagent lifecycle lines are emitted only when those hooks run. Lines ending
     in `blocked:` appear when the effective mode is `block` and the classifier
     returns `prediction` `MALICIOUS` or governance action `block`.
+
+    ```text
+    [firewall] subagent_delivery_target result:
+    [firewall] subagent_spawned result:
+    [firewall] subagent_progress result:
+    [firewall] subagent_ended result:
+    ```
 
 ## Failure Handling
 
