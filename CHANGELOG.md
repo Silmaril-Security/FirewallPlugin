@@ -2,7 +2,16 @@
 
 ## Unreleased
 
-No additional changes.
+## 1.2.12
+
+- Observe `subagent_progress` without returning a block, cancel, or replacement.
+- Correlate spawn, progress, and terminal child events through
+  `childSessionKey` and `targetSessionKey` while retaining
+  `requesterSessionKey` as separate parent identity.
+- Bound lifecycle classification text and preserve observer-only Block
+  candidates as native action `unavailable`.
+- Align onboarding with capability review, live plugin application,
+  conditional restart, deep Gateway status, and native callback verification.
 
 ## 1.2.11
 
