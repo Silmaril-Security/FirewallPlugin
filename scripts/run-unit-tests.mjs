@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -3499,9 +3500,37 @@ test("customer entry: a wrong archive digest fails install and a missing live cr
         env: { ...base, ...extra, CUSTOMER_RESULT: resultPath },
       });
       assert.equal(run.status, 1, label);
+      if (expected.install === "FAIL") assert.match(run.stderr, /archive digest mismatch/u);
       assert.deepEqual(JSON.parse(await readFile(resultPath, "utf8")), expected, label);
       assert.equal(`${run.stdout}${run.stderr}`.includes(secret), false, label);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("customer entry: missing credentials block live after a successful native receipt", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "customer-live-guard-"));
+  try {
+    const entry = path.join(root, "customer-published-acceptance");
+    await copyFile(path.join(repoRoot, "scripts/customer-published-acceptance"), entry);
+    await writeFile(path.join(root, "native-acceptance.mjs"), `
+      import { appendFileSync, writeFileSync } from "node:fs";
+      appendFileSync(process.env.CALLS, "called\\n");
+      writeFileSync(process.env.NATIVE_ACCEPTANCE_RECEIPT, JSON.stringify({
+        status: "PASS", plugin: { installed_bytes_match: true },
+      }));
+    `);
+    const calls = path.join(root, "calls");
+    const result = path.join(root, "result.json");
+    const run = spawnSync(entry, { env: {
+      PATH: process.env.PATH, CALLS: calls, CUSTOMER_RESULT: result,
+      CUSTOMER_ARTIFACT: "/archive.tgz", CUSTOMER_ARCHIVE_HELPER: "/helper.py",
+      CUSTOMER_ARTIFACT_SHA256: "a".repeat(64), CUSTOMER_SOURCE_SHA: "b".repeat(40), CUSTOMER_VERSION: "1.2.3",
+    } });
+    assert.equal(run.status, 1);
+    assert.equal(await readFile(calls, "utf8"), "called\n");
+    assert.deepEqual(JSON.parse(await readFile(result, "utf8")), { install: "PASS", native: "PASS", live: "BLOCKED" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

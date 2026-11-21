@@ -32,6 +32,22 @@ function publish() {
 
 const observed = (receipt) => (["PASS", "BLOCKED"].includes(receipt?.status) ? receipt.status : "FAIL");
 
+// Native errors can include child output. Emit a controlled reason only.
+function failureReason(receipt) {
+  const message = receipt.error?.message ?? "";
+  for (const [pattern, reason] of [
+    [/archive digest does not match/u, "archive digest mismatch"],
+    [/python3 .*failed:|ENOENT.*package.json/u, "archive extraction failed"],
+    [/archive package (?:name|version)/u, "archive manifest mismatch"],
+    [/plugins install|installed plugin bytes/u, "plugin installation verification failed"],
+    [/gateway|did not load/u, "host startup or plugin loading failed"],
+  ]) {
+    if (pattern.test(message)) return reason;
+  }
+  return receipt.plugin?.installed_bytes_match
+    ? "native scenario checks did not pass" : "host or package preparation failed";
+}
+
 function runHarness(receipt, extraEnv) {
   const { CUSTOMER_NATIVE_API_URL: _url, CUSTOMER_NATIVE_API_KEY: _key, CUSTOMER_NATIVE_CLASSIFIER: _mode, ...env } = process.env;
   const run = spawnSync(process.execPath, [harness], {
@@ -42,6 +58,7 @@ function runHarness(receipt, extraEnv) {
   try {
     const result = JSON.parse(readFileSync(receipt, "utf8"));
     if (result.status === "PASS" && run.status !== 0) result.status = "FAIL";
+    if (result.status !== "PASS") console.error(`native harness: ${failureReason(result)}`);
     return result;
   } catch {
     console.error(`native harness wrote no receipt (exit ${run.status ?? run.signal})`);
