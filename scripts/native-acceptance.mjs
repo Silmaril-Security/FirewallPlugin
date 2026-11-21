@@ -382,11 +382,42 @@ function packArtifact(root) {
   };
 }
 
-function installedBytesMatch(root, artifactPath, installedRoot) {
+function extractPackage(root, artifactPath, helper) {
+  if (helper) {
+    const packageRoot = path.join(root, "package-tree");
+    runChecked("python3", [helper, artifactPath, packageRoot, "--prefix", "package"]);
+    return packageRoot;
+  }
   const extracted = path.join(root, "extracted");
   mkdirSync(extracted);
   runChecked("tar", ["-xzf", artifactPath, "-C", extracted]);
-  const packageRoot = path.join(extracted, "package");
+  return path.join(extracted, "package");
+}
+
+// CUSTOMER_* inputs select a published archive instead of packing the working
+// tree. The archive is verified, staged privately, and unpacked by the shared
+// helper before the host sees it.
+function stageCustomerArtifact(root) {
+  const { CUSTOMER_ARTIFACT: archive, CUSTOMER_VERSION: version, CUSTOMER_ARTIFACT_SHA256: sha256, CUSTOMER_ARCHIVE_HELPER: helper } = process.env;
+  if (archive === undefined) return undefined;
+  assert(path.isAbsolute(archive) && path.isAbsolute(helper ?? ""), "CUSTOMER_ARTIFACT and CUSTOMER_ARCHIVE_HELPER must be absolute paths");
+  assert(/^[0-9a-f]{40}$/u.test(process.env.CUSTOMER_SOURCE_SHA ?? ""), "CUSTOMER_SOURCE_SHA must be a full commit");
+  assert(/^\d+\.\d+\.\d+$/u.test(version ?? ""), "CUSTOMER_VERSION must be plain semver");
+  assert(/^[0-9a-f]{64}$/u.test(sha256 ?? ""), "CUSTOMER_ARTIFACT_SHA256 must be lower-case hex");
+  const artifactDir = path.join(root, "artifact");
+  mkdirSync(artifactDir);
+  const artifactPath = path.join(artifactDir, path.basename(archive));
+  copyFileSync(archive, artifactPath);
+  const actual = createHash("sha256").update(readFileSync(artifactPath)).digest("hex");
+  assert.equal(actual, sha256, "archive digest does not match CUSTOMER_ARTIFACT_SHA256");
+  const packageRoot = extractPackage(root, artifactPath, helper);
+  const manifest = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+  assert.equal(manifest.name, packageJson.name, "archive package name mismatch");
+  assert.equal(manifest.version, version, "archive package version does not match CUSTOMER_VERSION");
+  return { artifactPath, sha256, version, packageRoot };
+}
+
+function installedBytesMatch(packageRoot, installedRoot) {
   return listFiles(packageRoot).every((file) => (
     existsSync(path.join(installedRoot, file))
     && readFileSync(path.join(installedRoot, file)).equals(readFileSync(path.join(packageRoot, file)))
@@ -483,9 +514,11 @@ function liveClassifierConfig() {
 }
 
 async function accept(state, root, resources) {
-  state.sourceSha = process.env.GITHUB_SHA
+  state.sourceSha = process.env.CUSTOMER_SOURCE_SHA
+    ?? process.env.GITHUB_SHA
     ?? runChecked("git", ["rev-parse", "HEAD"], { cwd: repoRoot }).trim();
   const liveConfig = liveClassifierConfig();
+  const customer = stageCustomerArtifact(root);
   const plans = scenarioPlans({ live: state.live, nonce: randomUUID().replaceAll("-", "") });
   state.expectedScenarioIds = plans.map((plan) => plan.id);
 
@@ -499,15 +532,14 @@ async function accept(state, root, resources) {
   assert(reportedVersion.startsWith(host.version), `expected ${HOST_NAME} ${host.version}, got ${reportedVersion}`);
   state.host = { name: HOST_NAME, version: reportedVersion };
 
-  const artifact = packArtifact(root);
+  const artifact = customer ?? packArtifact(root);
   await runHost(host, ["plugins", "install", ...INSTALL_FLAGS, artifact.artifactPath]);
   state.plugin = {
     name: packageJson.name,
-    version: packageJson.version,
+    version: customer?.version ?? packageJson.version,
     artifact_sha256: artifact.sha256,
     installed_bytes_match: installedBytesMatch(
-      root,
-      artifact.artifactPath,
+      customer?.packageRoot ?? extractPackage(root, artifact.artifactPath),
       path.join(host.home, ".openclaw", "extensions", pluginId),
     ),
     install_command: `${HOST_NAME} plugins install ${INSTALL_FLAGS.join(" ")} ${path.basename(artifact.artifactPath)}`,

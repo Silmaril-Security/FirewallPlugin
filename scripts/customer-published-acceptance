@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+// Customer release acceptance for the published npm archive.
+//
+// Runs the existing native harness (scripts/native-acceptance.mjs) twice on the
+// exact CUSTOMER_ARTIFACT: once with the loopback classifier and once with the
+// live Cascade classifier from CUSTOMER_NATIVE_API_URL / CUSTOMER_NATIVE_API_KEY.
+// The harness verifies the digest and version, unpacks with CUSTOMER_ARCHIVE_HELPER,
+// installs the archive through the OpenClaw CLI, and writes its own receipt into
+// private temporary space. CUSTOMER_RESULT only gets {install, native, live}.
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const harness = path.join(path.dirname(fileURLToPath(import.meta.url)), "native-acceptance.mjs");
+const HARNESS_TIMEOUT_MS = 25 * 60 * 1000;
+const REQUIRED = ["CUSTOMER_ARTIFACT", "CUSTOMER_ARTIFACT_SHA256", "CUSTOMER_VERSION", "CUSTOMER_SOURCE_SHA", "CUSTOMER_ARCHIVE_HELPER"];
+
+const resultPath = process.env.CUSTOMER_RESULT;
+if (!resultPath || !path.isAbsolute(resultPath)) {
+  console.error("CUSTOMER_RESULT must be an absolute path");
+  process.exit(2);
+}
+
+const result = { install: "BLOCKED", native: "BLOCKED", live: "BLOCKED" };
+function publish() {
+  const staged = `${resultPath}.${process.pid}.tmp`;
+  writeFileSync(staged, `${JSON.stringify(result)}\n`);
+  renameSync(staged, resultPath);
+}
+
+const observed = (receipt) => (["PASS", "BLOCKED"].includes(receipt?.status) ? receipt.status : "FAIL");
+
+function runHarness(receipt, extraEnv) {
+  const { CUSTOMER_NATIVE_API_URL: _url, CUSTOMER_NATIVE_API_KEY: _key, CUSTOMER_NATIVE_CLASSIFIER: _mode, ...env } = process.env;
+  const run = spawnSync(process.execPath, [harness], {
+    env: { ...env, ...extraEnv, NATIVE_ACCEPTANCE_RECEIPT: receipt },
+    stdio: ["ignore", "inherit", "ignore"],
+    timeout: HARNESS_TIMEOUT_MS,
+  });
+  try {
+    const result = JSON.parse(readFileSync(receipt, "utf8"));
+    if (result.status === "PASS" && run.status !== 0) result.status = "FAIL";
+    return result;
+  } catch {
+    console.error(`native harness wrote no receipt (exit ${run.status ?? run.signal})`);
+    return undefined;
+  }
+}
+
+publish();
+const work = mkdtempSync(path.join(os.tmpdir(), "customer-published-"));
+try {
+  const missing = REQUIRED.filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    console.error(`missing ${missing.join(", ")}`);
+  } else {
+    const native = runHarness(path.join(work, "native.json"), {});
+    result.install = native?.plugin?.installed_bytes_match === true ? "PASS" : "FAIL";
+    if (result.install === "PASS") result.native = observed(native);
+    publish();
+
+    const { CUSTOMER_NATIVE_API_URL: url, CUSTOMER_NATIVE_API_KEY: key } = process.env;
+    if (!url || !key) {
+      console.error("live case blocked: CUSTOMER_NATIVE_API_URL and CUSTOMER_NATIVE_API_KEY are required");
+    } else if (result.install === "PASS") {
+      const live = runHarness(path.join(work, "live.json"), {
+        CUSTOMER_NATIVE_CLASSIFIER: "live",
+        CUSTOMER_NATIVE_API_URL: url,
+        CUSTOMER_NATIVE_API_KEY: key,
+      });
+      result.live = observed(live);
+    }
+  }
+} finally {
+  rmSync(work, { recursive: true, force: true });
+  publish();
+}
+process.exitCode = Object.values(result).every((status) => status === "PASS") ? 0 : 1;

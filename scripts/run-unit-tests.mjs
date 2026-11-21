@@ -3467,6 +3467,46 @@ test("native acceptance: the host lockfile pins the OpenClaw version the package
   }));
 });
 
+test("customer entry: a wrong archive digest fails install and a missing live credential never passes", async () => {
+  const entry = path.join(repoRoot, "scripts", "customer-published-acceptance");
+  assert.notEqual((await stat(entry)).mode & 0o111, 0);
+  const root = await mkdtemp(path.join(tmpdir(), "customer-entry-"));
+  try {
+    const archive = path.join(root, "silmaril-security-firewall-plugin-1.2.12.tgz");
+    await writeFile(archive, "not the released bytes");
+    const base = {
+      PATH: process.env.PATH,
+      CUSTOMER_ARTIFACT: archive,
+      CUSTOMER_VERSION: "1.2.12",
+      CUSTOMER_SOURCE_SHA: "a".repeat(40),
+      CUSTOMER_ARTIFACT_SHA256: "0".repeat(64),
+      CUSTOMER_ARCHIVE_HELPER: path.join(root, "unpack_customer_plugin.py"),
+    };
+    const secret = "unit-live-secret-value";
+    const cases = [
+      ["no live credential", {}, { install: "FAIL", native: "BLOCKED", live: "BLOCKED" }],
+      ["live credential present", {
+        CUSTOMER_NATIVE_API_URL: "https://classifier.unit.invalid/classify",
+        CUSTOMER_NATIVE_API_KEY: secret,
+      }, { install: "FAIL", native: "BLOCKED", live: "BLOCKED" }],
+      ["missing archive input", { CUSTOMER_ARTIFACT: "" }, { install: "BLOCKED", native: "BLOCKED", live: "BLOCKED" }],
+    ];
+    for (const [label, extra, expected] of cases) {
+      const resultPath = path.join(root, "result.json");
+      await rm(resultPath, { force: true });
+      const run = spawnSync(entry, {
+        encoding: "utf8",
+        env: { ...base, ...extra, CUSTOMER_RESULT: resultPath },
+      });
+      assert.equal(run.status, 1, label);
+      assert.deepEqual(JSON.parse(await readFile(resultPath, "utf8")), expected, label);
+      assert.equal(`${run.stdout}${run.stderr}`.includes(secret), false, label);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 let failed = 0;
 const started = performance.now();
 for (const { name, fn } of tests) {
