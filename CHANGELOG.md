@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.3.0
+
+- Move to `@silmaril-security/sdk` 1.0.0, which calls `/v2/classify`, returns
+  the Firewall decision instead of a score, and falls back to `/classify` on
+  deployments without the new route. Plugin configuration is unchanged.
+- Decide on the SDK result's `action`: anything other than `allow` is a policy
+  candidate. A block whose `source` is `governance` keeps the governance risk
+  label and its benign recorded prediction.
+- Record the decision's `confidence` and `severity` in local evidence when the
+  Firewall reports a value the receipt schema knows, and stop writing
+  `modelScore` and `modelThreshold`. The event schema version and every other
+  field are unchanged.
+- Log `action` and `source` in place of `prediction`.
+- Serve `/v2/classify` with a version 2 body and `/classify` with a version 1
+  body from the mock classifier, and relay each route to the matching customer
+  route in live native acceptance.
+
 ## 1.2.12
 
 - Observe `subagent_progress` without returning a block, cancel, or replacement.

@@ -19,7 +19,7 @@ import type {
 } from "./local-evidence";
 
 const PLUGIN_ID = "firewall-plugin";
-const PLUGIN_VERSION = "1.2.12";
+const PLUGIN_VERSION = "1.3.0";
 const OPENCLAW_AGENT_ID = "openclaw";
 const LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 const DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
@@ -708,7 +708,8 @@ async function classifyHookPayload(
   });
   console.log("[firewall] " + meta.hookName + " result:", JSON.stringify({
     ...logFields(meta),
-    prediction: result.prediction,
+    action: result.action,
+    source: result.source,
     risk: describeRisk(result),
   }));
   return result;
@@ -1063,8 +1064,7 @@ function shouldBlockClassification(config: RuntimeConfig, result: BlockResult | 
 }
 
 function isPolicyBlockCandidate(result: BlockResult | undefined): result is BlockResult {
-  return result?.prediction === "MALICIOUS"
-    || result?.governance?.action === "block";
+  return result !== undefined && result.action !== "allow";
 }
 
 function effectiveMode(config: RuntimeConfig, result: BlockResult | undefined): FirewallMode {
@@ -1191,10 +1191,17 @@ function describeSurface(meta: HookLogMeta): string {
 }
 
 function describeRisk(result: BlockResult): string {
-  const outcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome : undefined;
-  const prediction = typeof result.prediction === "string" ? result.prediction.trim().toLowerCase() : undefined;
-  const governanceBlocked = result.governance?.action === "block";
-  switch (outcome?.trim().toLowerCase()) {
+  if (!isPolicyBlockCandidate(result)) {
+    return "No flagged risk";
+  }
+  if (result.source === "governance") {
+    return "Governance policy denial";
+  }
+  const outcome = result.outcome?.trim();
+  if (!outcome) {
+    return "Unsafe content";
+  }
+  switch (outcome.toLowerCase()) {
     case "information_disclosure":
       return "Sensitive information disclosure";
     case "secret_exposure":
@@ -1207,17 +1214,7 @@ function describeRisk(result: BlockResult): string {
     case "service_disruption":
       return "Service disruption risk";
     case "benign":
-      if (governanceBlocked && prediction !== "malicious") {
-        return "Governance policy denial";
-      }
-      return prediction === "malicious"
-        ? "Unexpected classification conflict"
-        : "No flagged risk";
-    case undefined:
-      if (governanceBlocked && prediction !== "malicious") {
-        return "Governance policy denial";
-      }
-      return prediction === "benign" ? "No flagged risk" : "Unsafe content";
+      return "Unexpected classification conflict";
     default:
       return outcome
         .replace(/[_-]+/g, " ")
@@ -1312,7 +1309,8 @@ function logSkipped(meta: HookLogMeta, reason: string): void {
 function logBlocked(meta: HookLogMeta, result: BlockResult): void {
   console.log("[firewall] " + meta.hookName + " blocked:", JSON.stringify({
     ...logFields(meta),
-    prediction: result.prediction,
+    action: result.action,
+    source: result.source,
     risk: describeRisk(result),
   }));
 }

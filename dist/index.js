@@ -19,6 +19,20 @@ import path from "node:path";
 var LOCAL_PROTECTION_EVENT_SCHEMA_VERSION = 1;
 var MAX_LOCAL_PROTECTION_EVENT_BYTES = 64 * 1024;
 var RUNTIME_CHECK_MARKER = /\bsilmaril-runtime-check:([A-Za-z0-9-]{16,128})\b/;
+var CONFIDENCE_LEVELS = /* @__PURE__ */ new Set([
+  "very_low",
+  "low",
+  "medium",
+  "high",
+  "very_high"
+]);
+var SEVERITY_LEVELS = /* @__PURE__ */ new Set([
+  "minimal",
+  "low",
+  "moderate",
+  "high",
+  "critical"
+]);
 var CONSEQUENCE_SUMMARIES = {
   credential_exposure: "A credential could be exposed by the proposed agent action.",
   sensitive_data_exposure: "Sensitive data could leave its intended boundary.",
@@ -41,10 +55,7 @@ function buildLocalProtectionEvent(input) {
     sha256(input.rawText)
   ]);
   const sessionFingerprint = input.sessionIdentity ? fingerprint([input.host, input.sessionIdentity]) : void 0;
-  const category = consequenceCategory(input.classification);
-  const prediction = normalizePrediction(input.classification.prediction);
-  const modelScore = unitInterval(input.classification.score);
-  const modelThreshold = unitInterval(input.classification.threshold);
+  const category = consequenceCategory(input.classification.outcome);
   const id = stableContractID("protection-event", [
     input.host,
     input.hook,
@@ -72,9 +83,9 @@ function buildLocalProtectionEvent(input) {
         CONSEQUENCE_SUMMARIES[category] ?? CONSEQUENCE_SUMMARIES.unknown
       )
     },
-    prediction,
-    modelScore,
-    modelThreshold,
+    prediction: modelPrediction(input.classification),
+    confidence: knownLevel(input.classification.confidence, CONFIDENCE_LEVELS),
+    severity: knownLevel(input.classification.severity, SEVERITY_LEVELS),
     policyDecision: input.policyDecision,
     nativeAction: input.nativeAction,
     warnDelivery: input.warnDelivery,
@@ -149,15 +160,14 @@ function resolveLocalEventDirectory(environment = process.env, homeDirectory = h
     "incoming"
   );
 }
-function normalizePrediction(value) {
-  if (value === "MALICIOUS") return "malicious";
-  if (value === "BENIGN") return "benign";
-  if (value === void 0 || value === null) return "unavailable";
-  return "unknown";
+function modelPrediction(classification) {
+  return classification.action === "allow" || classification.source === "governance" ? "benign" : "malicious";
 }
-function consequenceCategory(result) {
-  const raw = typeof result.primaryOutcome === "string" ? result.primaryOutcome : typeof result.primary_outcome === "string" ? result.primary_outcome : void 0;
-  switch (raw?.trim().toLowerCase()) {
+function knownLevel(value, levels) {
+  return levels.has(value) ? value : void 0;
+}
+function consequenceCategory(outcome) {
+  switch (outcome?.trim().toLowerCase()) {
     case "secret_exposure":
       return "credential_exposure";
     case "information_disclosure":
@@ -191,9 +201,6 @@ function boundedSummary(value) {
 function boundedIdentifier(value, maximum) {
   return value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, maximum);
 }
-function unitInterval(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : void 0;
-}
 function fingerprint(components) {
   return `sha256:${sha256(frame(components))}`;
 }
@@ -225,7 +232,7 @@ function omitUndefined(record) {
 
 // index.ts
 var PLUGIN_ID = "firewall-plugin";
-var PLUGIN_VERSION = "1.2.12";
+var PLUGIN_VERSION = "1.3.0";
 var OPENCLAW_AGENT_ID = "openclaw";
 var LOCAL_EVIDENCE_POLICY_VERSION = "openclaw-plugin-policy-v1";
 var DEFAULT_CLASSIFY_TIMEOUT_MS = 2500;
@@ -758,7 +765,8 @@ async function classifyHookPayload(classifier, text, meta, endpointId) {
   });
   console.log("[firewall] " + meta.hookName + " result:", JSON.stringify({
     ...logFields(meta),
-    prediction: result.prediction,
+    action: result.action,
+    source: result.source,
     risk: describeRisk(result)
   }));
   return result;
@@ -1011,7 +1019,7 @@ function shouldBlockClassification(config, result) {
   return effectiveMode(config, result) === "block" && isPolicyBlockCandidate(result);
 }
 function isPolicyBlockCandidate(result) {
-  return result?.prediction === "MALICIOUS" || result?.governance?.action === "block";
+  return result !== void 0 && result.action !== "allow";
 }
 function effectiveMode(config, result) {
   return config.mode ?? readMode(result?.mode) ?? "shadow";
@@ -1090,10 +1098,17 @@ function formatBlockReason(result) {
   return `Silmaril Firewall blocked this request: ${describeRisk(result)}. Continue without using the blocked content.`;
 }
 function describeRisk(result) {
-  const outcome = typeof result.primaryOutcome === "string" ? result.primaryOutcome : void 0;
-  const prediction = typeof result.prediction === "string" ? result.prediction.trim().toLowerCase() : void 0;
-  const governanceBlocked = result.governance?.action === "block";
-  switch (outcome?.trim().toLowerCase()) {
+  if (!isPolicyBlockCandidate(result)) {
+    return "No flagged risk";
+  }
+  if (result.source === "governance") {
+    return "Governance policy denial";
+  }
+  const outcome = result.outcome?.trim();
+  if (!outcome) {
+    return "Unsafe content";
+  }
+  switch (outcome.toLowerCase()) {
     case "information_disclosure":
       return "Sensitive information disclosure";
     case "secret_exposure":
@@ -1106,15 +1121,7 @@ function describeRisk(result) {
     case "service_disruption":
       return "Service disruption risk";
     case "benign":
-      if (governanceBlocked && prediction !== "malicious") {
-        return "Governance policy denial";
-      }
-      return prediction === "malicious" ? "Unexpected classification conflict" : "No flagged risk";
-    case void 0:
-      if (governanceBlocked && prediction !== "malicious") {
-        return "Governance policy denial";
-      }
-      return prediction === "benign" ? "No flagged risk" : "Unsafe content";
+      return "Unexpected classification conflict";
     default:
       return outcome.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
   }
@@ -1188,7 +1195,8 @@ function logSkipped(meta, reason) {
 function logBlocked(meta, result) {
   console.log("[firewall] " + meta.hookName + " blocked:", JSON.stringify({
     ...logFields(meta),
-    prediction: result.prediction,
+    action: result.action,
+    source: result.source,
     risk: describeRisk(result)
   }));
 }
