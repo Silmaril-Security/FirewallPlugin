@@ -965,6 +965,7 @@ function version1Body(text) {
     primary_outcome: source === "model" ? "secret_exposure" : "benign",
     outcome_scores: source === "model" ? { secret_exposure: 0.99 } : {},
     ...(source === "governance" ? { governance: GOVERNANCE_WIRE } : {}),
+    model_id: "synthetic-model",
   };
 }
 
@@ -3190,6 +3191,86 @@ test("local evidence: records known confidence and severity and never model scor
     const event = build(classification);
     assert.equal(event.prediction, prediction);
     assert.equal(absent(event, ["confidence", "severity", "modelScore", "modelThreshold"]), true);
+  }
+});
+
+test("local evidence: provenance versions are bounded the way the app ingests them", () => {
+  const provenance = (classification) => t.buildLocalProtectionEvent({
+    host: "openClaw",
+    hook: "pre_tool",
+    mode: "shadow",
+    rawText: "synthetic input",
+    classification,
+    policyDecision: "allow",
+    nativeAction: "allowed",
+    producer: "firewall-plugin",
+    producerVersion: "1.3.0",
+    pluginVersion: "1.3.0",
+    policyVersion: "openclaw-plugin-policy-v1",
+  }).provenance;
+  const withModel = (modelId) => provenance({ action: "allow", modelId });
+  const withPolicy = (policyVersion) => provenance({
+    action: "allow",
+    governance: { action: "allow", policyVersion },
+  });
+  for (const [raw, bounded] of [
+    ["  release-7  ", "release-7"],
+    ["re\u0000le\tase\u0085-7", "release-7"],
+    ["re\u200Ble\u00ADase\uFEFF-7", "release-7"],
+    ["\uD83Drelease\uDC00-7", "release-7"],
+    ["release-\u{1F512}", "release-\u{1F512}"],
+    ["a".repeat(128), "a".repeat(128)],
+    ["a".repeat(129), "a".repeat(128)],
+    ["\u00E9".repeat(65), "\u00E9".repeat(64)],
+    [`${"a".repeat(127)}\u00E9`, "a".repeat(127)],
+    [`${"a".repeat(126)}\u{1F512}`, "a".repeat(126)],
+  ]) {
+    assert.equal(withModel(raw).modelVersion, bounded);
+    assert.equal(withPolicy(raw).policyVersion, bounded);
+    assert.ok(Buffer.byteLength(bounded, "utf8") <= 128);
+  }
+  for (const absent of [undefined, null, 7, {}, ["release-7"], "", "   ", "\u200B\u0000"]) {
+    assert.equal(Object.hasOwn(withModel(absent), "modelVersion"), false);
+    assert.equal(withPolicy(absent).policyVersion, "openclaw-plugin-policy-v1");
+  }
+  assert.equal(provenance({ action: "allow" }).policyVersion, "openclaw-plugin-policy-v1");
+});
+
+test("local evidence: model and policy versions reach the event on every classifier deployment generation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-provenance-"));
+  const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
+  try {
+    for (const [name, deployment] of Object.entries(CLASSIFIER_DEPLOYMENTS)) {
+      await withClassifierDeployment(deployment.respond, async () => {
+        const env = registerPlugin({
+          pluginEntry: actualSdkMod.default,
+          config: {
+            apiKey: "test-key",
+            apiUrl: "https://firewall.invalid/classify",
+            timeoutMs: 1_000,
+            mode: "shadow",
+          },
+        });
+        for (const [command, policyVersion] of [
+          [GOVERNED_TEXT, "synthetic-policy"],
+          ["true", "openclaw-plugin-policy-v1"],
+        ]) {
+          const directory = path.join(root, `${name} ${policyVersion}`);
+          process.env.SILMARIL_LOCAL_EVENT_DIR = directory;
+          await withSilencedConsole(() => hook(env, "before_tool_call")(
+            { toolName: "exec", params: { command } },
+            {},
+          ));
+          const event = await readOnlyJSONEvent(directory);
+          assert.equal(event.provenance.policyVersion, policyVersion, name);
+          assert.equal(event.provenance.modelVersion, "synthetic-model", name);
+        }
+      });
+    }
+  } finally {
+    if (savedDirectory === undefined) delete process.env.SILMARIL_LOCAL_EVENT_DIR;
+    else process.env.SILMARIL_LOCAL_EVENT_DIR = savedDirectory;
+    await rm(root, { recursive: true, force: true });
   }
 });
 

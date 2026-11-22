@@ -18,6 +18,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 var LOCAL_PROTECTION_EVENT_SCHEMA_VERSION = 1;
 var MAX_LOCAL_PROTECTION_EVENT_BYTES = 64 * 1024;
+var MAX_PROVENANCE_BYTES = 128;
+var UNSAFE_PROVENANCE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Cs}]/gu;
 var RUNTIME_CHECK_MARKER = /\bsilmaril-runtime-check:([A-Za-z0-9-]{16,128})\b/;
 var CONFIDENCE_LEVELS = /* @__PURE__ */ new Set([
   "very_low",
@@ -56,6 +58,7 @@ function buildLocalProtectionEvent(input) {
   ]);
   const sessionFingerprint = input.sessionIdentity ? fingerprint([input.host, input.sessionIdentity]) : void 0;
   const category = consequenceCategory(input.classification.outcome);
+  const modelVersion = boundedProvenance(input.classification.modelId);
   const id = stableContractID("protection-event", [
     input.host,
     input.hook,
@@ -98,7 +101,8 @@ function buildLocalProtectionEvent(input) {
       producer: boundedIdentifier(input.producer, 128),
       producerVersion: boundedIdentifier(input.producerVersion, 128),
       pluginVersion: boundedIdentifier(input.pluginVersion, 128),
-      policyVersion: boundedIdentifier(input.policyVersion, 128),
+      policyVersion: boundedProvenance(input.classification.governance?.policyVersion) ?? boundedIdentifier(input.policyVersion, 128),
+      ...modelVersion ? { modelVersion } : {},
       observedAt
     }
   });
@@ -197,6 +201,17 @@ function safeToolDisplayName(value) {
 }
 function boundedSummary(value) {
   return value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 280);
+}
+function boundedProvenance(value) {
+  if (typeof value !== "string") return void 0;
+  let bounded = "";
+  let bytes = 0;
+  for (const character of value.replace(UNSAFE_PROVENANCE_CHARACTERS, "").trim()) {
+    bytes += Buffer.byteLength(character, "utf8");
+    if (bytes > MAX_PROVENANCE_BYTES) break;
+    bounded += character;
+  }
+  return bounded || void 0;
 }
 function boundedIdentifier(value, maximum) {
   return value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, maximum);

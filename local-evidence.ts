@@ -13,6 +13,8 @@ import type { BlockResult, Confidence, Severity } from "@silmaril-security/sdk";
 
 export const LOCAL_PROTECTION_EVENT_SCHEMA_VERSION = 1;
 export const MAX_LOCAL_PROTECTION_EVENT_BYTES = 64 * 1024;
+const MAX_PROVENANCE_BYTES = 128;
+const UNSAFE_PROVENANCE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Cs}]/gu;
 const RUNTIME_CHECK_MARKER = /\bsilmaril-runtime-check:([A-Za-z0-9-]{16,128})\b/;
 const CONFIDENCE_LEVELS: ReadonlySet<Confidence> = new Set([
   "very_low",
@@ -99,6 +101,7 @@ export type LocalProtectionEventV1 = {
     producerVersion: string;
     pluginVersion: string;
     policyVersion: string;
+    modelVersion?: string;
     observedAt: string;
   };
 };
@@ -139,6 +142,7 @@ export function buildLocalProtectionEvent(
     ? fingerprint([input.host, input.sessionIdentity])
     : undefined;
   const category = consequenceCategory(input.classification.outcome);
+  const modelVersion = boundedProvenance(input.classification.modelId);
   const id = stableContractID("protection-event", [
     input.host,
     input.hook,
@@ -184,7 +188,9 @@ export function buildLocalProtectionEvent(
       producer: boundedIdentifier(input.producer, 128),
       producerVersion: boundedIdentifier(input.producerVersion, 128),
       pluginVersion: boundedIdentifier(input.pluginVersion, 128),
-      policyVersion: boundedIdentifier(input.policyVersion, 128),
+      policyVersion: boundedProvenance(input.classification.governance?.policyVersion)
+        ?? boundedIdentifier(input.policyVersion, 128),
+      ...(modelVersion ? { modelVersion } : {}),
       observedAt,
     },
   }) as LocalProtectionEventV1;
@@ -313,6 +319,18 @@ function boundedSummary(value: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 280);
+}
+
+function boundedProvenance(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let bounded = "";
+  let bytes = 0;
+  for (const character of value.replace(UNSAFE_PROVENANCE_CHARACTERS, "").trim()) {
+    bytes += Buffer.byteLength(character, "utf8");
+    if (bytes > MAX_PROVENANCE_BYTES) break;
+    bounded += character;
+  }
+  return bounded || undefined;
 }
 
 function boundedIdentifier(value: string, maximum: number): string {

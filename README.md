@@ -217,7 +217,12 @@ Events contain hashes, bounded risk metadata, the decision's `confidence`
 (`very_low`, `low`, `medium`, `high`, `very_high`) and `severity` (`minimal`,
 `low`, `moderate`, `high`, `critical`) when the Firewall reports one of those
 values, policy, and the action returned to OpenClaw. `modelScore` and
-`modelThreshold` are no longer written. They never contain raw prompts, inputs, outputs, tool arguments, or
+`modelThreshold` are no longer written. `provenance.modelVersion` records the
+decision's model identifier when the Firewall reports one, and
+`provenance.policyVersion` records the governance decision's policy version,
+or the plugin's own policy constant when the decision carries no governance.
+Both are stripped of control and format characters and cut to 128 UTF-8
+bytes. They never contain raw prompts, inputs, outputs, tool arguments, or
 credential values. `outcome` is `not_observed` and `evidenceCompleteness` is
 `partial`. `evidenceTruth` is `native_response_returned` when the plugin
 returned a native block, and `plugin_reported` otherwise. A returned block is

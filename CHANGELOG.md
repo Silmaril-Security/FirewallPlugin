@@ -14,6 +14,10 @@
   Firewall reports a value the receipt schema knows, and stop writing
   `modelScore` and `modelThreshold`. The event schema version and every other
   field are unchanged.
+- Record `provenance.modelVersion` from the decision's model identifier and
+  `provenance.policyVersion` from the governance decision's policy version,
+  keeping the plugin policy constant for decisions without governance. Both
+  are stripped of control and format characters and cut to 128 UTF-8 bytes.
 - Log `action` and `source` in place of `prediction`.
 - Serve `/v2/classify` with a version 2 body and `/classify` with a version 1
   body from the mock classifier, and relay each route to the matching customer
