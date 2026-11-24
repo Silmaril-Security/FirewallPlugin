@@ -13,6 +13,7 @@ export const V1_ROUTE = "/classify";
 export async function startMockClassifier({ capturePath, maliciousMarkers = [], live } = {}) {
   const requests = [];
   const inFlight = new Set();
+  const refusedProbeStarts = new Map();
 
   const handle = async (request, response) => {
     const chunks = [];
@@ -49,23 +50,26 @@ export async function startMockClassifier({ capturePath, maliciousMarkers = [], 
     };
     requests.push(record);
 
-    const startedAt = performance.now();
+    const startedAt = refusedProbeStarts.get(rawBody) ?? performance.now();
+    refusedProbeStarts.delete(rawBody);
     const route = new URL(request.url, "http://loopback").pathname.endsWith(V2_ROUTE)
       ? V2_ROUTE
       : V1_ROUTE;
     const reply = live
       ? await forwardLive(live, route, rawBody)
       : { status: 200, payload: buildResponse(route, body, maliciousMarkers) };
-    if (live && route === V2_ROUTE && ROUTE_FALLBACK_STATUSES.has(reply.status)) {
+    if (reply.refused) {
       requests.splice(requests.indexOf(record), 1);
-    } else {
-      Object.assign(record, {
-        status: reply.status,
-        decision: isBlockDecision(reply.payload) ? "block" : "allow",
-        durationMs: Math.round(performance.now() - startedAt),
-        ...(live && reply.status === 200 ? { upstream: summarizeUpstream(reply.payload) } : {}),
-      });
+      refusedProbeStarts.set(rawBody, startedAt);
+      response.writeHead(reply.status).end();
+      return;
     }
+    Object.assign(record, {
+      status: reply.status,
+      decision: isBlockDecision(reply.payload) ? "block" : "allow",
+      durationMs: Math.round(performance.now() - startedAt),
+      ...(live && reply.status === 200 ? { upstream: summarizeUpstream(reply.payload) } : {}),
+    });
 
     response.writeHead(reply.status, { "content-type": "application/json" });
     response.end(JSON.stringify(reply.payload));
@@ -110,7 +114,13 @@ function forwardLive({ url, key, fetchImpl = fetch }, route, rawBody) {
     headers: { "content-type": "application/json", "x-api-key": key },
     body: rawBody,
   })
-    .then(async (upstream) => ({ status: upstream.status, payload: await upstream.json() }))
+    .then(async (upstream) => {
+      if (route === V2_ROUTE && ROUTE_FALLBACK_STATUSES.has(upstream.status)) {
+        await upstream.body?.cancel();
+        return { status: upstream.status, refused: true };
+      }
+      return { status: upstream.status, payload: await upstream.json() };
+    })
     .catch((error) => ({ status: 502, payload: { error: error.name } }));
 }
 

@@ -3567,8 +3567,13 @@ test("mock classifier: live mode relays each classify version to the matching up
 });
 
 test("mock classifier: live mode passes a missing version 2 route to the SDK and records only the fallback", async () => {
-  for (const status of [403, 404, 405]) {
+  for (const [status, refusalBody, contentType] of [
+    [403, JSON.stringify({ message: "Missing Authentication Token" }), "application/json"],
+    [404, "", "text/plain"],
+    [405, "<html><body>Method Not Allowed</body></html>", "text/html"],
+  ]) {
     const upstreamUrls = [];
+    const refusal = new Response(refusalBody, { status, headers: { "content-type": contentType } });
     const classifier = await startMockClassifier({
       maliciousMarkers: ["UNIT_ATTACK"],
       live: {
@@ -3576,8 +3581,9 @@ test("mock classifier: live mode passes a missing version 2 route to the SDK and
         key: "unit-live-key",
         fetchImpl: async (url) => {
           upstreamUrls.push(url);
+          await new Promise((resolve) => setTimeout(resolve, 150));
           return url.endsWith(V2_ROUTE)
-            ? Response.json({ message: "Missing Authentication Token" }, { status })
+            ? refusal
             : Response.json({ prediction: "MALICIOUS", mode: "shadow" });
         },
       },
@@ -3597,6 +3603,8 @@ test("mock classifier: live mode passes a missing version 2 route to the SDK and
         classifier.requests.map((request) => [request.status, request.decision, request.upstream]),
         Array(2).fill([200, "block", { prediction: "MALICIOUS", mode: "shadow", action: null }]),
       );
+      assert.equal(refusal.bodyUsed, true);
+      assert.ok(classifier.requests[0].durationMs >= 300, `${classifier.requests[0].durationMs} ms`);
     } finally {
       await classifier.close();
     }
