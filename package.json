@@ -28,7 +28,7 @@
     "@silmaril-security/sdk": "0.8.2"
   },
   "devDependencies": {
-    "esbuild": "0.28.0",
+    "esbuild": "0.28.1",
     "tsx": "4.22.3"
   },
   "openclaw": {
