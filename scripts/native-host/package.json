@@ -3,5 +3,11 @@
   "private": true,
   "dependencies": {
     "openclaw": "2026.11.2"
+  },
+  "overrides": {
+    "openclaw@2026.11.2": {
+      "npm": "12.2.3",
+      "zod": "4.6.6"
+    }
   }
 }
