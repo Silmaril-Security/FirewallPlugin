@@ -44,9 +44,9 @@ Source file: `index.ts`
 
 OpenClaw runtime entrypoint: `dist/index.js`
 
-Prepared package and runtime attribution are `1.2.12` with
-`@silmaril-security/sdk` `0.8.2`. The post-publication registry and local
-archive examples below both use `1.2.12`.
+Prepared package and runtime attribution are `1.3.0` with
+`@silmaril-security/sdk` `1.0.0`. The post-publication registry and local
+archive examples below both use `1.3.0`.
 
 Runtime behavior:
 
@@ -58,8 +58,8 @@ Runtime behavior:
   return `{ prependContext }` with one fixed content-free warning. Block mode
   leaves this hook unchanged and does not record `blockUnavailable` here
 - `before_agent_run` classifies the final agent prompt as `USER_INPUT`. When
-  the effective mode is `block` and the model prediction is `MALICIOUS` or
-  `governance.action` is `block`, it can return
+  the effective mode is `block` and the SDK result's `action` is not `allow`,
+  it can return
   `{ outcome: "block", reason }`
 - `before_prompt_build` and `before_agent_run` share one content-sensitive
   classification for five seconds only when both callbacks provide the same
@@ -135,8 +135,8 @@ Configuration fields:
 
 Omitting `mode` and both legacy flags leaves the plugin mode unset. The
 effective mode is then the classifier response mode, or Shadow when the
-response has no mode. An exact `prediction === "MALICIOUS"` or exact
-`governance.action === "block"` is enforceable; malformed actions are not.
+response has no mode. An SDK result whose `action` is not `allow` is
+enforceable.
 
 The plugin entry must also set `hooks.allowConversationAccess=true`; OpenClaw
 otherwise blocks `before_agent_run` for non-bundled plugins.
@@ -254,7 +254,7 @@ for direct source loading or the CLI install path is unavailable.
    Exact npm registry flow after publication:
 
    ```sh
-   openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.12
+   openclaw plugins install npm:@silmaril-security/firewall-plugin@1.3.0
    openclaw plugins enable firewall-plugin
    ```
 
@@ -277,7 +277,7 @@ for direct source loading or the CLI install path is unavailable.
 
    ```sh
    npm pack
-   openclaw plugins install npm-pack:./silmaril-security-firewall-plugin-1.2.12.tgz
+   openclaw plugins install npm-pack:./silmaril-security-firewall-plugin-1.3.0.tgz
    openclaw plugins enable firewall-plugin
    ```
 
@@ -377,7 +377,7 @@ for direct source loading or the CLI install path is unavailable.
 
     Subagent lifecycle lines are emitted only when those hooks run. Lines ending
     in `blocked:` appear when the effective mode is `block` and the classifier
-    returns `prediction` `MALICIOUS` or governance action `block`.
+    decision's `action` is `block`.
 
     ```text
     [firewall] subagent_delivery_target result:

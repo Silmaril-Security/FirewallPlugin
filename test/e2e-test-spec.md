@@ -10,8 +10,8 @@ the response mode. With `mode` omitted, `shadowMode: true` forces Shadow even
 when `blockMalicious` is `true`. `shadowMode: false` selects Block only when
 `blockMalicious: true`; otherwise it stays Shadow.
 
-An exact `prediction === "MALICIOUS"` or exact
-`governance.action === "block"` is enforceable. Block responses are:
+An SDK result whose `action` is not `allow` is enforceable. Block responses
+are:
 
 - `before_agent_run`: `{ "outcome": "block", "reason": "..." }`
 - `before_tool_call`: `{ "block": true, "blockReason": "..." }`
@@ -51,11 +51,12 @@ inspecting CLI and should show `Status: loaded` plus the hooks registered in
 An actual hook event, such as `firewall-plugin: installed` in the smoke flow,
 is the running Gateway proof.
 
-The bundled mock classifier, `scripts/mock-silmaril-classifier.mjs`, returns
-`BENIGN` unless the classified text contains one of the comma-separated markers
-in `SILMARIL_CLASSIFIER_MALICIOUS_MARKERS`, in which case it returns
-`MALICIOUS`. Enforcement checks need a classifier response whose `prediction`
-is `MALICIOUS`.
+The bundled mock classifier, `scripts/mock-silmaril-classifier.mjs`, serves
+`/v2/classify` with a version 2 body and `/classify` with a version 1 body. It
+allows unless the classified text contains one of the comma-separated markers
+in `SILMARIL_CLASSIFIER_MALICIOUS_MARKERS`, in which case it answers `action`
+`block` (`prediction` `MALICIOUS` on `/classify`). Enforcement checks need a
+classifier response whose `action` is `block`.
 
 ## Automated Native Acceptance
 
@@ -161,8 +162,8 @@ classifications with `missing_config`.
 ## Enforcement Smoke Flow
 
 Configure `mode: "block"`, or omit `mode` and set `shadowMode: false` with
-`blockMalicious: true`. Drive a classifier response with `prediction`
-`MALICIOUS`. Expected behavior:
+`blockMalicious: true`. Drive a classifier response with `action` `block`.
+Expected behavior:
 
 - `before_agent_run` returns `{ "outcome": "block", "reason": "..." }`.
 - `before_tool_call` returns `{ "block": true, "blockReason": "..." }`.
@@ -171,9 +172,9 @@ Configure `mode: "block"`, or omit `mode` and set `shadowMode: false` with
 - `reply_payload_sending` returns `{ "cancel": true }`.
 - Reason text is `Silmaril Firewall blocked this request: <risk label>. Continue without using the blocked content.`
   The risk label comes from the classifier outcome, for example
-  `Unsafe agent control attempt` when `primaryOutcome` is `control_abuse`.
+  `Unsafe agent control attempt` when `outcome` is `control_abuse`.
   The reason omits tool name, hook surface, raw prompt text, tool parameters,
-  tool result text, scores, and thresholds.
+  tool result text, confidence, and severity.
 - `before_prompt_build` returns `undefined` in Block mode.
 - `after_tool_call`, `tool_result_persist`, and the subagent hooks return
   `undefined`. A malicious Block-mode classification on those hooks records

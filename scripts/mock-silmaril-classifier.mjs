@@ -6,10 +6,14 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 const LIVE_UPSTREAM_TIMEOUT_MS = 10_000;
+const ROUTE_FALLBACK_STATUSES = new Set([403, 404, 405]);
+export const V2_ROUTE = "/v2/classify";
+export const V1_ROUTE = "/classify";
 
 export async function startMockClassifier({ capturePath, maliciousMarkers = [], live } = {}) {
   const requests = [];
   const inFlight = new Set();
+  const refusedProbeStarts = new Map();
 
   const handle = async (request, response) => {
     const chunks = [];
@@ -46,10 +50,20 @@ export async function startMockClassifier({ capturePath, maliciousMarkers = [], 
     };
     requests.push(record);
 
-    const startedAt = performance.now();
+    const startedAt = refusedProbeStarts.get(rawBody) ?? performance.now();
+    refusedProbeStarts.delete(rawBody);
+    const route = new URL(request.url, "http://loopback").pathname.endsWith(V2_ROUTE)
+      ? V2_ROUTE
+      : V1_ROUTE;
     const reply = live
-      ? await forwardLive(live, rawBody)
-      : { status: 200, payload: buildResponse(body, maliciousMarkers) };
+      ? await forwardLive(live, route, rawBody)
+      : { status: 200, payload: buildResponse(route, body, maliciousMarkers) };
+    if (reply.refused) {
+      requests.splice(requests.indexOf(record), 1);
+      refusedProbeStarts.set(rawBody, startedAt);
+      response.writeHead(reply.status).end();
+      return;
+    }
     Object.assign(record, {
       status: reply.status,
       decision: isBlockDecision(reply.payload) ? "block" : "allow",
@@ -84,28 +98,54 @@ export async function startMockClassifier({ capturePath, maliciousMarkers = [], 
   };
 }
 
-function forwardLive({ url, key, fetchImpl = fetch }, rawBody) {
-  return fetchImpl(url, {
+export function upstreamRoute(configuredUrl, route) {
+  const url = new URL(configuredUrl);
+  const base = url.pathname.replace(/\/$/u, "");
+  const configuredRoute = [V2_ROUTE, V1_ROUTE].find((known) => base.endsWith(known));
+  url.pathname = `${configuredRoute ? base.slice(0, -configuredRoute.length) : base}${route}`;
+  return url.href;
+}
+
+function forwardLive({ url, key, fetchImpl = fetch }, route, rawBody) {
+  return fetchImpl(upstreamRoute(url, route), {
     method: "POST",
     redirect: "error",
     signal: AbortSignal.timeout(LIVE_UPSTREAM_TIMEOUT_MS),
     headers: { "content-type": "application/json", "x-api-key": key },
     body: rawBody,
   })
-    .then(async (upstream) => ({ status: upstream.status, payload: await upstream.json() }))
+    .then(async (upstream) => {
+      if (route === V2_ROUTE && ROUTE_FALLBACK_STATUSES.has(upstream.status)) {
+        await upstream.body?.cancel();
+        return { status: upstream.status, refused: true };
+      }
+      return { status: upstream.status, payload: await upstream.json() };
+    })
     .catch((error) => ({ status: 502, payload: { error: error.name } }));
 }
 
+function singleResult(payload) {
+  return Array.isArray(payload.results) && payload.results.length === 1
+    ? payload.results[0]
+    : undefined;
+}
+
 function summarizeUpstream(payload) {
-  return {
-    prediction: payload.prediction ?? null,
-    mode: payload.mode ?? null,
-    action: payload.governance?.action ?? null,
-  };
+  const result = singleResult(payload);
+  return result
+    ? { action: result.action ?? null, source: result.source ?? null }
+    : {
+      prediction: payload.prediction ?? null,
+      mode: payload.mode ?? null,
+      action: payload.governance?.action ?? null,
+    };
 }
 
 function isBlockDecision(payload) {
-  return payload.prediction === "MALICIOUS" || payload.governance?.action === "block";
+  const result = singleResult(payload);
+  return result
+    ? typeof result.action === "string" && result.action !== "allow"
+    : payload.prediction === "MALICIOUS" || payload.governance?.action === "block";
 }
 
 function classifiedTexts(body) {
@@ -124,7 +164,25 @@ function buildPrediction(text, maliciousMarkers) {
   };
 }
 
-function buildResponse(body, maliciousMarkers) {
+function buildResult(text, maliciousMarkers) {
+  const malicious = containsMarker(text, maliciousMarkers);
+  return {
+    action: malicious ? "block" : "allow",
+    source: malicious ? "model" : null,
+    confidence: malicious ? "very_high" : null,
+    severity: malicious ? "high" : null,
+    outcome: malicious ? "control_abuse" : null,
+    governance: null,
+    model_id: null,
+  };
+}
+
+function buildResponse(route, body, maliciousMarkers) {
+  if (route === V2_ROUTE) {
+    return {
+      results: classifiedTexts(body).map((text) => buildResult(text, maliciousMarkers)),
+    };
+  }
   if (Array.isArray(body?.texts)) {
     return {
       predictions: body.texts.map((text) => buildPrediction(text, maliciousMarkers)),

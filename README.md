@@ -17,7 +17,8 @@ version `2026.8.2` (`package.json` `openclaw.compat`). This patched security
 floor excludes affected core host lines identified by OpenClaw advisories. The
 current registration and hook contract are qualified against OpenClaw
 `2026.11.2`. The shipped classifier dependency pin in this source checkout is
-`@silmaril-security/sdk` `0.8.2`. The manifest declares startup activation for
+`@silmaril-security/sdk` `1.0.0`, which calls `/v2/classify` on the configured
+endpoint and falls back to `/classify` on deployments without it. The manifest declares startup activation for
 hook capability loading, and the runtime entry registers typed Gateway hooks
 with `api.on(...)`. Upgrade an existing OpenClaw host older than `2026.8.2`
 through its supported installation method before enabling this plugin version;
@@ -45,7 +46,7 @@ Hook registration is unconditional, so OpenClaw can discover and invoke the
 Gateway hooks even before classifier settings are validated. Classifier config
 is resolved inside each hook call.
 
-Enforceable hooks await `@silmaril-security/sdk` `0.8.2` with a plugin-owned
+Enforceable hooks await `@silmaril-security/sdk` `1.0.0` with a plugin-owned
 timeout. `before_prompt_build` and `before_agent_run` share one prompt
 classification for five seconds when both callbacks provide the same stable
 event ID and unchanged content. ID-less callbacks classify independently. Warn
@@ -62,13 +63,13 @@ remains separate parent correlation and never replaces the child identity.
 `message_sending` and `reply_payload_sending` share a five-second result when
 duplicate callbacks provide the same stable event ID and unchanged content.
 Changed content and ID-less callbacks are classified separately. Image-only and
-other empty payloads are skipped. The central policy candidate is an exact
-`MALICIOUS` model prediction
-or an exact governance action of `block`; malformed or unknown governance
-actions do not block. Governance-only denials preserve the original benign
-model prediction in local evidence. User-visible and
-model-visible feedback never includes raw classifier JSON, numeric scores or
-thresholds, detector maps, metadata dumps, or the original sensitive payload.
+other empty payloads are skipped. The central policy candidate is an SDK
+result whose `action` is not `allow`; `source`, `confidence`, `severity`,
+`outcome`, and an attached governance decision never create or cancel one. A
+block whose `source` is `governance` uses the governance risk label and is
+recorded with a benign model prediction in local evidence. User-visible and
+model-visible feedback never includes raw classifier JSON, confidence or
+severity labels, metadata dumps, or the original sensitive payload.
 Block text is `Silmaril Firewall blocked this request: <risk label>. Continue without using the blocked content.`
 
 ## Files
@@ -156,7 +157,7 @@ The Silmaril endpoint app supplies `endpointId` as a canonical UUID v4. Every cl
 Classifier calls identify the fixed OpenClaw agent through the SDK's typed
 governance context. Tool-call and tool-response hooks with a native `toolName`
 use a canonical `tool` resource; other classified hooks use the fixed
-`openclaw` agent resource. SDK 0.8.2 serializes that resource at the request's
+`openclaw` agent resource. The SDK serializes that resource at the request's
 top-level `resource` field and repeats the same attribution under
 `metadata.silmaril.governance`. A tool name remains a flat `tool` identity.
 The plugin does not infer an MCP server, emit an `mcp_tool` resource, or treat
@@ -212,9 +213,16 @@ Publication uses a private temporary file followed by an atomic rename. The
 directory is mode `0700` and event files are mode `0600`. Emission is
 best-effort: filesystem failures never change the native OpenClaw decision.
 
-Events contain hashes, bounded risk metadata, model score and threshold when
-those values fall in the unit interval, policy, and the action returned to
-OpenClaw. They never contain raw prompts, inputs, outputs, tool arguments, or
+Events contain hashes, bounded risk metadata, the decision's `confidence`
+(`very_low`, `low`, `medium`, `high`, `very_high`) and `severity` (`minimal`,
+`low`, `moderate`, `high`, `critical`) when the Firewall reports one of those
+values, policy, and the action returned to OpenClaw. `modelScore` and
+`modelThreshold` are no longer written. `provenance.modelVersion` records the
+decision's model identifier when the Firewall reports one, and
+`provenance.policyVersion` records the governance decision's policy version,
+or the plugin's own policy constant when the decision carries no governance.
+Both are stripped of control and format characters and cut to 128 UTF-8
+bytes. They never contain raw prompts, inputs, outputs, tool arguments, or
 credential values. `outcome` is `not_observed` and `evidenceCompleteness` is
 `partial`. `evidenceTruth` is `native_response_returned` when the plugin
 returned a native block, and `plugin_reported` otherwise. A returned block is
@@ -222,13 +230,13 @@ not represented as independently verified prevention.
 
 ## Install
 
-Version `1.2.12` is the prepared source-candidate package version. It keeps
-`@silmaril-security/sdk` at `0.8.2`.
+Version `1.3.0` is the prepared source-candidate package version. It moves
+`@silmaril-security/sdk` to `1.0.0`.
 
-After `1.2.12` is published, install that exact npm registry release:
+After `1.3.0` is published, install that exact npm registry release:
 
 ```sh
-openclaw plugins install npm:@silmaril-security/firewall-plugin@1.2.12
+openclaw plugins install npm:@silmaril-security/firewall-plugin@1.3.0
 openclaw plugins enable firewall-plugin
 ```
 
@@ -270,7 +278,7 @@ generated tarball:
 npm install
 npm run build
 npm pack
-openclaw plugins install npm-pack:./silmaril-security-firewall-plugin-1.2.12.tgz
+openclaw plugins install npm-pack:./silmaril-security-firewall-plugin-1.3.0.tgz
 openclaw plugins enable firewall-plugin
 ```
 

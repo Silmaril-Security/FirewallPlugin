@@ -9,10 +9,27 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import type { BlockResult, Confidence, Severity } from "@silmaril-security/sdk";
 
 export const LOCAL_PROTECTION_EVENT_SCHEMA_VERSION = 1;
 export const MAX_LOCAL_PROTECTION_EVENT_BYTES = 64 * 1024;
+const MAX_PROVENANCE_BYTES = 128;
+const UNSAFE_PROVENANCE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Cs}]/gu;
 const RUNTIME_CHECK_MARKER = /\bsilmaril-runtime-check:([A-Za-z0-9-]{16,128})\b/;
+const CONFIDENCE_LEVELS: ReadonlySet<Confidence> = new Set([
+  "very_low",
+  "low",
+  "medium",
+  "high",
+  "very_high",
+]);
+const SEVERITY_LEVELS: ReadonlySet<Severity> = new Set([
+  "minimal",
+  "low",
+  "moderate",
+  "high",
+  "critical",
+]);
 
 export type LocalHost = "openClaw" | "openCode";
 export type LocalHook =
@@ -33,14 +50,6 @@ export type LocalNativeAction =
   | "failed"
   | "unavailable";
 
-type ClassificationLike = {
-  prediction?: unknown;
-  score?: unknown;
-  threshold?: unknown;
-  primaryOutcome?: unknown;
-  primary_outcome?: unknown;
-};
-
 export type LocalProtectionEventInput = {
   host: LocalHost;
   hook: LocalHook;
@@ -49,7 +58,7 @@ export type LocalProtectionEventInput = {
   requestIdentity?: string;
   sessionIdentity?: string;
   toolName?: string;
-  classification: ClassificationLike;
+  classification: BlockResult;
   policyDecision: LocalPolicyDecision;
   nativeAction: LocalNativeAction;
   warnDelivery?: "delivered" | "unsupported";
@@ -76,9 +85,9 @@ export type LocalProtectionEventV1 = {
     category: string;
     summary: string;
   };
-  prediction: "benign" | "malicious" | "unknown" | "unavailable";
-  modelScore?: number;
-  modelThreshold?: number;
+  prediction: "benign" | "malicious";
+  confidence?: Confidence;
+  severity?: Severity;
   policyDecision: LocalPolicyDecision;
   nativeAction: LocalNativeAction;
   warnDelivery?: "delivered" | "unsupported";
@@ -92,6 +101,7 @@ export type LocalProtectionEventV1 = {
     producerVersion: string;
     pluginVersion: string;
     policyVersion: string;
+    modelVersion?: string;
     observedAt: string;
   };
 };
@@ -131,10 +141,8 @@ export function buildLocalProtectionEvent(
   const sessionFingerprint = input.sessionIdentity
     ? fingerprint([input.host, input.sessionIdentity])
     : undefined;
-  const category = consequenceCategory(input.classification);
-  const prediction = normalizePrediction(input.classification.prediction);
-  const modelScore = unitInterval(input.classification.score);
-  const modelThreshold = unitInterval(input.classification.threshold);
+  const category = consequenceCategory(input.classification.outcome);
+  const modelVersion = boundedProvenance(input.classification.modelId);
   const id = stableContractID("protection-event", [
     input.host,
     input.hook,
@@ -163,9 +171,9 @@ export function buildLocalProtectionEvent(
         CONSEQUENCE_SUMMARIES[category] ?? CONSEQUENCE_SUMMARIES.unknown,
       ),
     },
-    prediction,
-    modelScore,
-    modelThreshold,
+    prediction: modelPrediction(input.classification),
+    confidence: knownLevel(input.classification.confidence, CONFIDENCE_LEVELS),
+    severity: knownLevel(input.classification.severity, SEVERITY_LEVELS),
     policyDecision: input.policyDecision,
     nativeAction: input.nativeAction,
     warnDelivery: input.warnDelivery,
@@ -180,7 +188,9 @@ export function buildLocalProtectionEvent(
       producer: boundedIdentifier(input.producer, 128),
       producerVersion: boundedIdentifier(input.producerVersion, 128),
       pluginVersion: boundedIdentifier(input.pluginVersion, 128),
-      policyVersion: boundedIdentifier(input.policyVersion, 128),
+      policyVersion: boundedProvenance(input.classification.governance?.policyVersion)
+        ?? boundedIdentifier(input.policyVersion, 128),
+      ...(modelVersion ? { modelVersion } : {}),
       observedAt,
     },
   }) as LocalProtectionEventV1;
@@ -257,22 +267,23 @@ export function resolveLocalEventDirectory(
   );
 }
 
-function normalizePrediction(
-  value: unknown,
+function modelPrediction(
+  classification: BlockResult,
 ): LocalProtectionEventV1["prediction"] {
-  if (value === "MALICIOUS") return "malicious";
-  if (value === "BENIGN") return "benign";
-  if (value === undefined || value === null) return "unavailable";
-  return "unknown";
+  return classification.action === "allow" || classification.source === "governance"
+    ? "benign"
+    : "malicious";
 }
 
-function consequenceCategory(result: ClassificationLike): string {
-  const raw = typeof result.primaryOutcome === "string"
-    ? result.primaryOutcome
-    : typeof result.primary_outcome === "string"
-      ? result.primary_outcome
-      : undefined;
-  switch (raw?.trim().toLowerCase()) {
+function knownLevel<Level extends string>(
+  value: string | undefined,
+  levels: ReadonlySet<Level>,
+): Level | undefined {
+  return levels.has(value as Level) ? (value as Level) : undefined;
+}
+
+function consequenceCategory(outcome: string | undefined): string {
+  switch (outcome?.trim().toLowerCase()) {
     case "secret_exposure":
       return "credential_exposure";
     case "information_disclosure":
@@ -310,20 +321,23 @@ function boundedSummary(value: string): string {
     .slice(0, 280);
 }
 
+function boundedProvenance(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let bounded = "";
+  let bytes = 0;
+  for (const character of value.replace(UNSAFE_PROVENANCE_CHARACTERS, "").trim()) {
+    bytes += Buffer.byteLength(character, "utf8");
+    if (bytes > MAX_PROVENANCE_BYTES) break;
+    bounded += character;
+  }
+  return bounded || undefined;
+}
+
 function boundedIdentifier(value: string, maximum: number): string {
   return value
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .trim()
     .slice(0, maximum);
-}
-
-function unitInterval(value: unknown): number | undefined {
-  return typeof value === "number"
-    && Number.isFinite(value)
-    && value >= 0
-    && value <= 1
-    ? value
-    : undefined;
 }
 
 function fingerprint(components: string[]): string {

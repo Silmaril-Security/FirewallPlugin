@@ -19,7 +19,12 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Firewall as RealFirewall } from "@silmaril-security/sdk";
-import { startMockClassifier } from "./mock-silmaril-classifier.mjs";
+import {
+  startMockClassifier,
+  upstreamRoute,
+  V1_ROUTE,
+  V2_ROUTE,
+} from "./mock-silmaril-classifier.mjs";
 import {
   buildReceipt,
   evaluateScenario,
@@ -80,7 +85,7 @@ function unitTestStubs() {
                 const handler = globalThis.__silmarilFirewallClassify;
                 const result = handler
                   ? await handler(text, options)
-                  : { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+                  : { action: "allow" };
                 const mode = this.options.mode ?? result.mode;
                 return mode === undefined ? { ...result } : { ...result, mode };
               }
@@ -436,10 +441,9 @@ function assertClassifyOptions(options, expected) {
 
 function assertNoRawDecisionText(text, rawNeedle) {
   assert.equal(text.includes("```json"), false);
-  assert.equal(text.includes("score"), false);
-  assert.equal(text.includes("threshold"), false);
-  assert.equal(text.includes("primaryOutcome"), false);
-  assert.equal(text.includes("outcomeScores"), false);
+  assert.equal(text.includes("confidence"), false);
+  assert.equal(text.includes("severity"), false);
+  assert.equal(text.includes("very_high"), false);
   if (rawNeedle) {
     assert.equal(text.includes(rawNeedle), false);
   }
@@ -521,7 +525,8 @@ test("actual pinned SDK serializes trusted tool and agent resources with aligned
         {},
       ),
     ));
-    assert.equal(toolResult.prediction, "BENIGN");
+    assert.equal(toolResult.action, "block");
+    assert.equal(toolResult.source, "governance");
     assert.deepEqual(toolResult.governance, {
       action: "block",
       ruleId: "synthetic-rule",
@@ -553,9 +558,9 @@ test("actual pinned SDK serializes trusted tool and agent resources with aligned
     assert.equal(requests[0].metadata.toolName, "exec");
     assert.equal(requests[0].metadata.conversationId, "session-1");
     assert.equal(requests[0].metadata.silmaril.integration, "firewall-plugin");
-    assert.equal(requests[0].metadata.silmaril.version, "1.2.12");
+    assert.equal(requests[0].metadata.silmaril.version, "1.3.0");
     assert.equal(requests[0].metadata.silmaril.sdk_language, "typescript");
-    assert.equal(requests[0].metadata.silmaril.sdk_version, "0.8.2");
+    assert.equal(requests[0].metadata.silmaril.sdk_version, "1.0.0");
     assert.match(requests[0].metadata.silmaril.request_id, /^firewall-plugin-[a-f0-9]{64}$/);
 
     assert.deepEqual(requests[1].resource, { kind: "agent", id: "openclaw" });
@@ -569,16 +574,10 @@ test("actual pinned SDK serializes trusted tool and agent resources with aligned
   });
 });
 
-test("actual pinned SDK rejects malformed responses, modes, detector counts, and batch counts", async () => {
+test("actual pinned SDK rejects malformed responses, modes, and batch counts", async () => {
   await withLocalClassifier([
     { score: 0.01, threshold: 0.5 },
     { prediction: "BENIGN", score: 0.01, threshold: 0.5, mode: "monitor" },
-    {
-      prediction: "BENIGN",
-      score: 0.01,
-      threshold: 0.5,
-      detector_counts: { control_abuse: 1.5 },
-    },
     {
       prediction: "BENIGN",
       score: 0.01,
@@ -590,12 +589,10 @@ test("actual pinned SDK rejects malformed responses, modes, detector counts, and
         { prediction: "BENIGN", score: 0.01, threshold: 0.5 },
       ],
     },
-    {
-      prediction: "BENIGN",
-      score: 0.01,
-      threshold: 0.5,
-      detector_counts: { control_abuse: 2 },
-    },
+    { results: [{ source: "model" }] },
+    { results: { action: "block" } },
+    { results: [{ action: "allow" }] },
+    { prediction: "BENIGN", score: 0.01, threshold: 0.5 },
   ], async ({ apiUrl }) => {
     const firewall = new RealFirewall({
       apiKey: "test-key",
@@ -611,20 +608,29 @@ test("actual pinned SDK rejects malformed responses, modes, detector counts, and
       /response mode must be shadow, warn, or block/,
     );
     await assert.rejects(
-      firewall.classify("invalid count"),
-      /invalid detector_counts value/,
-    );
-    await assert.rejects(
       firewall.classify("invalid governance"),
       /response governance action must be allow or block/,
     );
     await assert.rejects(
       firewall.classifyBatch(["one", "two"]),
-      /predictions length 1 does not match submitted texts length 2/,
+      /response results length 1 does not match submitted texts length 2/,
     );
-    const valid = await firewall.classify("valid count");
-    assert.deepEqual(valid.detectorCounts, { control_abuse: 2 });
-    assert.equal(valid.mode, undefined);
+    await assert.rejects(
+      firewall.classify("missing action"),
+      /response result action must be a string/,
+    );
+    await assert.rejects(
+      firewall.classify("results is not a list"),
+      /response results must be an array/,
+    );
+    for (const text of ["version 2 allow", "version 1 allow"]) {
+      const valid = await firewall.classify(text);
+      assert.equal(valid.action, "allow");
+      assert.equal(valid.mode, undefined);
+      for (const removed of ["prediction", "score", "threshold", "primaryOutcome", "detectorCounts"]) {
+        assert.equal(Object.hasOwn(valid, removed), false, removed);
+      }
+    }
   });
 });
 
@@ -740,7 +746,7 @@ test("actual pinned SDK: deadline bounds stalled response bodies and clears time
       });
       const bounded = actualSdkT.createBoundedClassificationClient(firewall, 10_000);
       const result = await bounded.classify("synthetic immediate result", {});
-      assert.equal(result.prediction, "BENIGN");
+      assert.equal(result.action, "allow");
       assert.equal(clock.pendingCount(), 0, "SDK and plugin deadline timers are cleared");
     });
   } finally {
@@ -923,6 +929,139 @@ test("actual pinned SDK: completed block decisions and pass-through modes are un
   }
 });
 
+const ATTACK_TEXT = "synthetic attack";
+const GOVERNED_TEXT = "synthetic governed action";
+const GOVERNANCE_WIRE = {
+  action: "block",
+  rule_id: "synthetic-rule",
+  policy_version: "synthetic-policy",
+};
+
+function classifierSource(text) {
+  return text.includes(GOVERNED_TEXT) ? "governance" : text.includes(ATTACK_TEXT) ? "model" : undefined;
+}
+
+function version2Body(text) {
+  const source = classifierSource(text);
+  return {
+    results: [{
+      action: source ? "block" : "allow",
+      source: source ?? null,
+      confidence: source === "model" ? "very_high" : null,
+      severity: source === "model" ? "critical" : null,
+      outcome: source === "model" ? "secret_exposure" : null,
+      governance: source === "governance" ? GOVERNANCE_WIRE : null,
+      model_id: "synthetic-model",
+    }],
+  };
+}
+
+function version1Body(text) {
+  const source = classifierSource(text);
+  return {
+    prediction: source === "model" ? "MALICIOUS" : "BENIGN",
+    score: source === "model" ? 0.99 : 0.01,
+    threshold: 0.5,
+    primary_outcome: source === "model" ? "secret_exposure" : "benign",
+    outcome_scores: source === "model" ? { secret_exposure: 0.99 } : {},
+    ...(source === "governance" ? { governance: GOVERNANCE_WIRE } : {}),
+    model_id: "synthetic-model",
+  };
+}
+
+const CLASSIFIER_DEPLOYMENTS = {
+  "version 2 route": {
+    routes: ["/v2/classify"],
+    respond: (_pathname, text) => Response.json(version2Body(text)),
+  },
+  "version 1 route only": {
+    routes: ["/v2/classify", "/classify"],
+    respond: (pathname, text) => pathname === "/classify"
+      ? Response.json(version1Body(text))
+      : Response.json({ message: "Not Found" }, { status: 404 }),
+  },
+  "version 2 route answering a version 1 body": {
+    routes: ["/v2/classify"],
+    respond: (_pathname, text) => Response.json(version1Body(text)),
+  },
+};
+
+async function withClassifierDeployment(respond, fn) {
+  const originalFetch = globalThis.fetch;
+  const pathnames = [];
+  globalThis.fetch = async (input, init) => {
+    const { pathname } = new URL(String(input));
+    pathnames.push(pathname);
+    return respond(pathname, JSON.parse(String(init?.body)).text);
+  };
+  try {
+    return await fn(pathnames);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("actual pinned SDK: returns the decision on every classifier deployment generation", async () => {
+  for (const [name, deployment] of Object.entries(CLASSIFIER_DEPLOYMENTS)) {
+    await withClassifierDeployment(deployment.respond, async (pathnames) => {
+      const firewall = new RealFirewall({
+        apiKey: "test-key",
+        apiUrl: "https://firewall.invalid/classify",
+        timeoutMs: 1_000,
+      });
+      const blocked = await firewall.classify(ATTACK_TEXT, { hook: "user_input" });
+      assert.deepEqual(
+        [blocked.action, blocked.source, blocked.outcome],
+        ["block", "model", "secret_exposure"],
+        name,
+      );
+      assert.deepEqual(
+        [blocked.confidence, blocked.severity],
+        name === "version 2 route" ? ["very_high", "critical"] : [undefined, undefined],
+        name,
+      );
+      assert.equal(actualSdkT.isPolicyBlockCandidate(blocked), true, name);
+      const allowed = await firewall.classify("hello", { hook: "user_input" });
+      assert.equal(actualSdkT.isPolicyBlockCandidate(allowed), false, name);
+      assert.deepEqual(pathnames, [...deployment.routes, deployment.routes.at(-1)], name);
+    });
+  }
+});
+
+test("actual pinned SDK: a block is enforced on every classifier deployment generation", async () => {
+  for (const [name, deployment] of Object.entries(CLASSIFIER_DEPLOYMENTS)) {
+    await withClassifierDeployment(deployment.respond, async (pathnames) => {
+      const env = registerPlugin({
+        pluginEntry: actualSdkMod.default,
+        config: {
+          apiKey: "test-key",
+          apiUrl: "https://firewall.invalid/classify",
+          timeoutMs: 1_000,
+          mode: "block",
+        },
+      });
+      const toolCall = (command) => withSilencedConsole(() => hook(env, "before_tool_call")(
+        { toolName: "exec", params: { command } },
+        {},
+      ));
+
+      const blockedRun = await withSilencedConsole(() => hook(env, "before_agent_run")(
+        { prompt: ATTACK_TEXT, runId: `generation-${name}` },
+        {},
+      ));
+      assert.equal(blockedRun.outcome, "block", name);
+      const blockedTool = await toolCall(ATTACK_TEXT);
+      assert.equal(blockedTool.block, true, name);
+      assert.match(blockedTool.blockReason, /Secret or credential exposure/, name);
+      const governed = await toolCall(GOVERNED_TEXT);
+      assert.equal(governed.block, true, name);
+      assert.match(governed.blockReason, /Governance policy denial/, name);
+      assert.equal(await toolCall("true"), undefined, name);
+      assert.deepEqual([...new Set(pathnames)], deployment.routes, name);
+    });
+  }
+});
+
 test("config and metadata use canonical plugin-owned endpoint provenance", () => {
   const endpointId = "2b64e603-f82a-4aec-9524-9736472dc80a";
   assert.equal(t.resolveRuntimeConfig({ apiKey: "key", apiUrl: "https://x", endpointId }).endpointId, endpointId);
@@ -933,7 +1072,7 @@ test("config and metadata use canonical plugin-owned endpoint provenance", () =>
   }, endpointId), {
     silmaril: {
       integration: "firewall-plugin",
-      version: "1.2.12",
+      version: "1.3.0",
       provenance: { schema_version: 1, endpoint_id: endpointId, harness: "openclaw" },
     },
     keep: true,
@@ -968,13 +1107,13 @@ test("mac computer name refresh does not block classification", async () => {
             assert.equal(options.metadata.silmaril.provenance.device_name, undefined);
             assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
             assert.equal(options.metadata.silmaril.provenance.endpoint_id, undefined);
-            return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+            return { action: "allow" };
           },
         },
         "payload",
         makeMeta(),
       );
-      assert.equal(cold.prediction, "BENIGN");
+      assert.equal(cold.action, "allow");
       assert.equal(logs.some((line) => line.includes("Office Mac")), false);
     });
     assert.deepEqual(calls, [{
@@ -1102,13 +1241,13 @@ test("failed computer name lookups retry after five seconds and stay plugin-owne
           classify: async (_text, options) => {
             assert.equal(options.metadata.silmaril.provenance.device_name, undefined);
             assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
-            return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+            return { action: "allow" };
           },
         },
         "payload",
         makeMeta(),
       );
-      assert.equal(result.prediction, "BENIGN");
+      assert.equal(result.action, "allow");
       assert.equal([...logs, ...errors].join("\n").includes("SECRET-COMPUTER"), false);
     });
     await t.flushMacDeviceNameRefreshForTests();
@@ -1152,13 +1291,13 @@ test("plugin registration warms the mac name before a later classification", asy
           assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
           assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
           assert.equal(options.metadata.silmaril.provenance.endpoint_id, undefined);
-          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          return { action: "allow" };
         },
       },
       "payload",
       makeMeta(),
     ));
-    assert.equal(result.prediction, "BENIGN");
+    assert.equal(result.action, "allow");
     assert.equal(calls.length, 1);
   });
 });
@@ -1196,13 +1335,13 @@ test("proactive refresh keeps device_name for a classification more than five mi
       {
         classify: async (_text, options) => {
           assert.equal(options.metadata.silmaril.provenance.device_name, "Renamed Mac");
-          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          return { action: "allow" };
         },
       },
       "payload",
       makeMeta(),
     ));
-    assert.equal(result.prediction, "BENIGN");
+    assert.equal(result.action, "allow");
     assert.equal(calls.length, 2);
   });
 });
@@ -1236,13 +1375,13 @@ test("a low-frequency classification keeps the last validated name when the refr
           assert.equal(settled, false);
           assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
           assert.equal(options.metadata.silmaril.provenance.harness, "openclaw");
-          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          return { action: "allow" };
         },
       },
       "payload",
       makeMeta(),
     ));
-    assert.equal(result.prediction, "BENIGN");
+    assert.equal(result.action, "allow");
     assert.equal(calls.length, 2);
     resolveNext("Renamed Mac\n");
     await t.flushMacDeviceNameRefreshForTests();
@@ -1270,13 +1409,13 @@ test("device_name is omitted once the last validation passes the staleness bound
       {
         classify: async (_text, options) => {
           assert.equal(options.metadata.silmaril.provenance.device_name, undefined);
-          return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+          return { action: "allow" };
         },
       },
       "payload",
       makeMeta(),
     ));
-    assert.equal(result.prediction, "BENIGN");
+    assert.equal(result.action, "allow");
     assert.equal(calls.length, 2);
   });
 });
@@ -1314,13 +1453,13 @@ test("a failed refresh keeps the bounded name and retries without blocking", asy
         {
           classify: async (_text, options) => {
             assert.equal(options.metadata.silmaril.provenance.device_name, "Office Mac");
-            return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+            return { action: "allow" };
           },
         },
         "payload",
         makeMeta(),
       );
-      assert.equal(result.prediction, "BENIGN");
+      assert.equal(result.action, "allow");
       assert.equal([...logs, ...errors].join("\n").includes("SECRET-COMPUTER"), false);
     });
     assert.equal(calls.filter((entry) => entry === "fail").length, 1);
@@ -1409,8 +1548,8 @@ test("package metadata: devDependencies is unique and complete", async () => {
   assert.ok(packageJson.files.includes("scripts/open-playground.mjs"));
   assert.deepEqual(Object.keys(packageJson.devDependencies).sort(), ["esbuild", "tsx"]);
   assert.equal(packageJson.name, "@silmaril-security/firewall-plugin");
-  assert.equal(packageJson.version, "1.2.12");
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
+  assert.equal(packageJson.version, "1.3.0");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "1.0.0");
   assert.deepEqual(packageJson.publishConfig, { access: "public", provenance: true });
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.8.2");
   assert.equal(packageJson.openclaw.compat.minGatewayVersion, "2026.8.2");
@@ -1647,13 +1786,13 @@ test("classifier: non-empty payload passes hook and toolName", async () => {
             toolName: "exec",
             eventType: "before_tool_call",
           });
-          return { prediction: "BENIGN", score: 0.12, threshold: 0.5, primaryOutcome: "benign" };
+          return { action: "allow" };
         },
       },
       "payload",
       makeMeta({ hookName: "before_tool_call", hook: "TOOL_CALL", toolName: "exec" }),
     );
-    assert.deepEqual(result, { prediction: "BENIGN", score: 0.12, threshold: 0.5, primaryOutcome: "benign" });
+    assert.deepEqual(result, { action: "allow" });
     assert.ok(logs.some((line) => line.includes("[firewall] before_tool_call result:")));
   });
 });
@@ -1740,18 +1879,22 @@ test("stable request and outbound dedupe identities are conversation-scoped and 
   }, "one"), undefined);
 });
 
-test("describeRisk treats benign results without outcome as clean", () => {
-  assert.equal(t.describeRisk({ prediction: "BENIGN" }), "No flagged risk");
-  assert.equal(t.describeRisk({ prediction: "MALICIOUS" }), "Unsafe content");
-  assert.equal(t.describeRisk({ prediction: "MALICIOUS", primaryOutcome: "control_abuse" }), "Unsafe agent control attempt");
+test("describeRisk follows the action, then the source, then the outcome", () => {
+  assert.equal(t.describeRisk({ action: "allow" }), "No flagged risk");
+  assert.equal(t.describeRisk({ action: "allow", outcome: "control_abuse" }), "No flagged risk");
+  assert.equal(t.describeRisk({ action: "block" }), "Unsafe content");
+  assert.equal(t.describeRisk({ action: "block", source: "model", outcome: "control_abuse" }), "Unsafe agent control attempt");
+  assert.equal(t.describeRisk({ action: "block", source: "model", outcome: "secret_exposure" }), "Secret or credential exposure");
+  assert.equal(t.describeRisk({ action: "block", source: "model", outcome: "future_outcome" }), "Future Outcome");
   assert.equal(t.describeRisk({
-    prediction: "BENIGN",
-    primaryOutcome: "benign",
+    action: "block",
+    source: "governance",
     governance: { action: "block", policyVersion: "synthetic-policy" },
   }), "Governance policy denial");
   assert.equal(t.describeRisk({
-    prediction: "MALICIOUS",
-    primaryOutcome: "benign",
+    action: "block",
+    source: "model",
+    outcome: "benign",
   }), "Unexpected classification conflict");
 });
 
@@ -1858,7 +2001,7 @@ test("plugin: only completed maximum-delay policy candidates block; benign and S
     {
       hookName: "before_agent_run",
       mode: "block",
-      result: { prediction: "MALICIOUS", primaryOutcome: "control_abuse" },
+      result: { action: "block", source: "model", outcome: "control_abuse" },
       assertValue(value) {
         assert.equal(value.outcome, "block");
       },
@@ -1867,8 +2010,8 @@ test("plugin: only completed maximum-delay policy candidates block; benign and S
       hookName: "before_tool_call",
       mode: "block",
       result: {
-        prediction: "BENIGN",
-        primaryOutcome: "benign",
+        action: "block",
+        source: "governance",
         governance: { action: "block", policyVersion: "fixture" },
       },
       assertValue(value) {
@@ -1878,7 +2021,7 @@ test("plugin: only completed maximum-delay policy candidates block; benign and S
     {
       hookName: "before_agent_run",
       mode: "block",
-      result: { prediction: "BENIGN", primaryOutcome: "benign" },
+      result: { action: "allow" },
       assertValue(value) {
         assert.equal(value, undefined);
       },
@@ -1886,7 +2029,7 @@ test("plugin: only completed maximum-delay policy candidates block; benign and S
     {
       hookName: "before_tool_call",
       mode: "shadow",
-      result: { prediction: "MALICIOUS", primaryOutcome: "control_abuse" },
+      result: { action: "block", source: "model", outcome: "control_abuse" },
       assertValue(value) {
         assert.equal(value, undefined);
       },
@@ -1944,7 +2087,7 @@ test("plugin: near-deadline block path is sensitive to a shortened classifier de
     let lateCompletion = false;
     globalThis.__silmarilFirewallClassify = async () => clock.delay(9999, () => {
       lateCompletion = true;
-      return { prediction: "MALICIOUS", primaryOutcome: "control_abuse" };
+      return { action: "block", source: "model", outcome: "control_abuse" };
     });
     const entry = env.hooks.get("before_agent_run");
     assert.equal(entry.options.timeoutMs, 10998);
@@ -1984,10 +2127,11 @@ test("plugin: prompt Warn context and Block gate surfaces are both registered", 
 test("plugin: Warn adds one bounded same-turn context and shares the prompt classification", async () => {
   const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u", mode: "warn" } });
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
   const event = { prompt: "raw secret prompt", runId: "run-warn", sessionId: "session-warn" };
   await withSilencedConsole(async () => {
@@ -2014,8 +2158,8 @@ test("plugin: back-to-back ID-less events classify independently in every mode",
     globalThis.__silmarilFirewallClassify = async () => {
       invocation += 1;
       return invocation === 1
-        ? { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" }
-        : { prediction: "MALICIOUS", score: 0.99, threshold: 0.5, primaryOutcome: "control_abuse" };
+        ? { action: "allow" }
+        : { action: "block", source: "model", confidence: "very_high", severity: "high", outcome: "control_abuse" };
     };
     const event = { prompt: "same ID-less prompt", sessionId: `session-${testCase.name}` };
 
@@ -2050,14 +2194,15 @@ test("bundled plugin keeps ID-less decisions fresh across tool and lifecycle act
       promptInvocations += 1;
       if (promptInvocations === 2) {
         return {
-          prediction: "MALICIOUS",
-          score: 0.99,
-          threshold: 0.5,
-          primaryOutcome: "control_abuse",
+          action: "block",
+          source: "model",
+          confidence: "very_high",
+          severity: "high",
+          outcome: "control_abuse",
         };
       }
     }
-    return { prediction: "BENIGN", score: 0.01, threshold: 0.5, primaryOutcome: "benign" };
+    return { action: "allow" };
   };
   const promptEvent = { prompt: "same ID-less prompt", sessionId: "session-intervening" };
 
@@ -2098,10 +2243,11 @@ test("plugin: missing config warns once and classifications fail open", async ()
 test("plugin: before_agent_run sends one user prompt to Silmaril in shadow mode", async () => {
   const env = registerPlugin();
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
   await withConsoleCapture(async ({ logs }) => {
     const result = await hook(env, "before_agent_run")({
@@ -2134,10 +2280,11 @@ test("plugin: before_agent_run blocks unsafe model submissions when enforcement 
     },
   });
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
 
   await withConsoleCapture(async ({ logs }) => {
@@ -2160,10 +2307,11 @@ test("plugin: before_agent_run blocks unsafe model submissions when enforcement 
 test("plugin: after_tool_call scans child tool results in their execution path", async () => {
   const env = registerPlugin();
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
 
   await withConsoleCapture(async ({ logs }) => {
@@ -2191,10 +2339,11 @@ test("plugin: after_tool_call scans child tool results in their execution path",
 test("plugin: message_sent is telemetry-only and subagent hooks preserve stable child correlation", async () => {
   const env = registerPlugin();
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
 
   await withConsoleCapture(async ({ logs }) => {
@@ -2261,7 +2410,7 @@ test("plugin: before_tool_call classifies safe-stringified params and passes thr
       toolName: "exec",
       eventType: "before_tool_call",
     });
-    return { prediction: "MALICIOUS", score: 0.99, threshold: 0.5, primaryOutcome: "control_abuse" };
+    return { action: "block", source: "model", confidence: "very_high", severity: "high", outcome: "control_abuse" };
   };
   await withSilencedConsole(async () => {
     const result = await hook(env, "before_tool_call")({ toolName: "exec", params: circular }, {});
@@ -2279,10 +2428,11 @@ test("plugin: optional enforcement blocks enforceable outputs when not shadowing
     },
   });
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
 
   await withConsoleCapture(async ({ logs }) => {
@@ -2324,10 +2474,8 @@ test("plugin: governance-only denials block every enforceable native boundary", 
     config: { apiKey: "k", apiUrl: "u", mode: "block" },
   });
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "BENIGN",
-    score: 0.01,
-    threshold: 0.5,
-    primaryOutcome: "benign",
+    action: "block",
+    source: "governance",
     governance: { action: "block", policyVersion: "synthetic-policy" },
   });
 
@@ -2367,10 +2515,8 @@ test("plugin: governance-only denials block every enforceable native boundary", 
 
 test("plugin: governance-only candidates retain Warn and Shadow behavior", async () => {
   const governanceOnly = {
-    prediction: "BENIGN",
-    score: 0.01,
-    threshold: 0.5,
-    primaryOutcome: "benign",
+    action: "block",
+    source: "governance",
     governance: { action: "block", policyVersion: "synthetic-policy" },
   };
 
@@ -2406,7 +2552,7 @@ test("plugin: outbound callbacks share one classification and changed content ca
   const env = registerPlugin({
     config: { apiKey: "k", apiUrl: "u", blockMalicious: true, shadowMode: false },
   });
-  globalThis.__silmarilFirewallClassify = async () => ({ prediction: "MALICIOUS", score: 0.01 });
+  globalThis.__silmarilFirewallClassify = async () => ({ action: "block" });
 
   await withSilencedConsole(async () => {
     const message = await hook(env, "message_sending")({
@@ -2440,10 +2586,11 @@ test("plugin: Shadow is silent and preserves every supported boundary", async ()
     },
   });
   globalThis.__silmarilFirewallClassify = async () => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   });
 
   const cases = [
@@ -2477,72 +2624,65 @@ test("decision: exact MALICIOUS or exact governance block is a policy candidate"
     mode: "block",
   };
   assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "BENIGN",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "benign",
+    action: "allow",
   }), false);
   assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "BENIGN",
-    score: 0.01,
-    threshold: 0.5,
-    primaryOutcome: "benign",
+    action: "block",
+    source: "governance",
     governance: { action: "block", policyVersion: "synthetic-policy" },
   }), true);
   for (const governance of [
     undefined,
     { action: "allow", policyVersion: "synthetic-policy" },
-    { action: "BLOCK", policyVersion: "synthetic-policy" },
+    { action: "block", policyVersion: "synthetic-policy" },
   ]) {
-    assert.equal(t.isPolicyBlockCandidate({
-      prediction: "BENIGN",
-      governance,
-    }), false);
+    assert.equal(t.isPolicyBlockCandidate({ action: "allow", governance }), false);
+    assert.equal(t.isPolicyBlockCandidate({ action: "block", governance }), true);
   }
+  assert.equal(t.isPolicyBlockCandidate(undefined), false);
+  assert.equal(t.shouldBlockToolCall(config, undefined), false);
   assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "BENIGN",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "allow",
+    confidence: "very_high",
+    severity: "critical",
+    outcome: "control_abuse",
   }), false);
   assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "benign",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "benign",
   }), true);
   assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "MALICIOUS",
-    score: 0.1,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   }), true);
   assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   }), true);
-  assert.equal(t.shouldBlockToolCall(config, {
-    primaryOutcome: "control_abuse",
-  }), false);
-  assert.equal(t.shouldBlockToolCall(config, {
-    prediction: "malicious",
-    blocked: true,
-    score: 1,
-  }), false);
+  assert.equal(t.shouldBlockToolCall(config, { action: "block" }), true);
+  assert.equal(t.shouldBlockToolCall(config, { action: "block", source: "future_source" }), true);
   assert.equal(t.shouldBlockToolCall({ ...config, mode: "shadow" }, {
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   }), false);
   assert.equal(t.effectiveMode({ ...config, mode: "shadow" }, {
-    prediction: "MALICIOUS",
+    action: "block",
     mode: "block",
   }), "shadow");
   assert.equal(t.effectiveMode({ ...config, mode: undefined }, {
-    prediction: "MALICIOUS",
+    action: "block",
   }), "shadow");
 });
 
@@ -2577,10 +2717,11 @@ test("plugin: before_tool_call uses config captured before classifier await", as
     const call = hook(env, "before_tool_call")({ toolName: "exec", params: { command: "true" } }, {});
     config.mode = "shadow";
     release({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      primaryOutcome: "control_abuse",
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "high",
+      outcome: "control_abuse",
     });
     assert.deepEqual(await call, {
       block: true,
@@ -2701,10 +2842,11 @@ test("plugin: tool_result_persist stays pass-through and returns immediately", a
     release = resolve;
   });
   globalThis.__silmarilFirewallClassify = async () => pending.then(() => ({
-    prediction: "MALICIOUS",
-    score: 0.99,
-    threshold: 0.5,
-    primaryOutcome: "control_abuse",
+    action: "block",
+    source: "model",
+    confidence: "very_high",
+    severity: "high",
+    outcome: "control_abuse",
   }));
   await withSilencedConsole(async () => {
     const result = hook(env, "tool_result_persist")({ message: { content: "tool output" } }, {});
@@ -2786,16 +2928,17 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
     sessionIdentity: "session-1",
     toolName: "exec",
     classification: {
-      prediction: "MALICIOUS",
-      score: 0.93,
-      threshold: 0.5,
-      primaryOutcome: "secret_exposure",
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "high",
+      outcome: "secret_exposure",
     },
     policyDecision: "block",
     nativeAction: "block_returned",
     producer: "firewall-plugin",
-    producerVersion: "1.2.12",
-    pluginVersion: "1.2.12",
+    producerVersion: "1.3.0",
+    pluginVersion: "1.3.0",
     policyVersion: "openclaw-plugin-policy-v1",
   };
   const event = t.buildLocalProtectionEvent({
@@ -2818,14 +2961,16 @@ test("local evidence: schema is V1-compatible and excludes raw classified bytes"
   assert.equal(event.riskClass, "credential_exposure");
   assert.equal(event.attemptedConsequence.category, "credential_exposure");
   assert.equal(event.prediction, "malicious");
-  assert.equal(event.modelScore, 0.93);
-  assert.equal(event.modelThreshold, 0.5);
+  assert.equal(event.confidence, "very_high");
+  assert.equal(event.severity, "high");
+  assert.equal(Object.hasOwn(event, "modelScore"), false);
+  assert.equal(Object.hasOwn(event, "modelThreshold"), false);
   assert.equal(event.policyDecision, "block");
   assert.equal(event.nativeAction, "block_returned");
   assert.equal(event.outcome, "not_observed");
   assert.equal(event.evidenceTruth, "native_response_returned");
   assert.equal(event.evidenceCompleteness, "partial");
-  assert.equal(event.provenance.pluginVersion, "1.2.12");
+  assert.equal(event.provenance.pluginVersion, "1.3.0");
   assert.equal(event.id, retry.id);
   assert.equal(event.requestFingerprint, retry.requestFingerprint);
   assert.equal(event.sessionFingerprint, retry.sessionFingerprint);
@@ -2856,16 +3001,17 @@ test("local evidence: writer uses private atomic single-file publication", async
       requestIdentity: "request-atomic",
       sessionIdentity: "session-atomic",
       classification: {
-        prediction: "MALICIOUS",
-        score: 0.88,
-        threshold: 0.5,
-        primaryOutcome: "control_abuse",
+        action: "block",
+        source: "model",
+        confidence: "very_high",
+        severity: "high",
+        outcome: "control_abuse",
       },
       policyDecision: "monitor",
       nativeAction: "allowed",
       producer: "firewall-plugin",
-      producerVersion: "1.2.12",
-      pluginVersion: "1.2.12",
+      producerVersion: "1.3.0",
+      pluginVersion: "1.3.0",
       policyVersion: "openclaw-plugin-policy-v1",
     }, { directory });
 
@@ -2891,12 +3037,12 @@ test("local evidence: Repair marker has a stable opaque fingerprint", () => {
     hook: "user_input",
     mode: "shadow",
     rawText: `Reply with OK only. ${marker}`,
-    classification: { prediction: "BENIGN", primaryOutcome: "benign" },
+    classification: { action: "allow" },
     policyDecision: "allow",
     nativeAction: "allowed",
     producer: "firewall-plugin",
-    producerVersion: "1.2.12",
-    pluginVersion: "1.2.12",
+    producerVersion: "1.3.0",
+    pluginVersion: "1.3.0",
     policyVersion: "openclaw-plugin-policy-v1",
   });
   const serialized = JSON.stringify(event);
@@ -2912,10 +3058,11 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
   const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
   try {
     globalThis.__silmarilFirewallClassify = async () => ({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      primaryOutcome: "control_abuse",
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "high",
+      outcome: "control_abuse",
     });
 
     const blockDirectory = path.join(root, "block");
@@ -2929,10 +3076,11 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
       },
     });
     globalThis.__silmarilFirewallClassify = async () => ({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      primaryOutcome: "control_abuse",
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "high",
+      outcome: "control_abuse",
     });
     const blocked = await withSilencedConsole(() => hook(blockPlugin, "before_tool_call")(
       { toolName: "exec", params: { command: "OPENCLAW_BLOCK_SECRET_CANARY" } },
@@ -2971,10 +3119,11 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
       },
     });
     globalThis.__silmarilFirewallClassify = async () => ({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      primaryOutcome: "control_abuse",
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "high",
+      outcome: "control_abuse",
     });
     const allowed = await withSilencedConsole(() => hook(shadowPlugin, "before_tool_call")(
       { toolName: "exec", params: { command: "OPENCLAW_SHADOW_SECRET_CANARY" } },
@@ -2997,6 +3146,134 @@ test("local evidence: Block and Shadow preserve distinct native action semantics
   }
 });
 
+test("local evidence: records known confidence and severity and never model scores", () => {
+  const build = (classification) => t.buildLocalProtectionEvent({
+    host: "openClaw",
+    hook: "pre_tool",
+    mode: "block",
+    rawText: "synthetic input",
+    classification,
+    policyDecision: "block",
+    nativeAction: "block_returned",
+    producer: "firewall-plugin",
+    producerVersion: "1.3.0",
+    pluginVersion: "1.3.0",
+    policyVersion: "openclaw-plugin-policy-v1",
+  });
+  const absent = (event, keys) => keys.every((key) => !Object.hasOwn(event, key));
+  for (const [confidence, severity] of [
+    ["very_low", "minimal"],
+    ["low", "low"],
+    ["medium", "moderate"],
+    ["high", "high"],
+    ["very_high", "critical"],
+  ]) {
+    const event = build({ action: "block", source: "model", confidence, severity });
+    assert.equal(event.schemaVersion, 1);
+    assert.equal(event.prediction, "malicious");
+    assert.equal(event.confidence, confidence);
+    assert.equal(event.severity, severity);
+    assert.equal(absent(event, ["modelScore", "modelThreshold"]), true);
+  }
+  const unknownLevels = build({
+    action: "block",
+    source: "model",
+    confidence: "certain",
+    severity: "extreme",
+  });
+  assert.equal(absent(unknownLevels, ["confidence", "severity"]), true);
+  assert.equal(JSON.stringify(unknownLevels).includes("certain"), false);
+  for (const [classification, prediction] of [
+    [{ action: "allow" }, "benign"],
+    [{ action: "block", source: "governance" }, "benign"],
+    [{ action: "block" }, "malicious"],
+  ]) {
+    const event = build(classification);
+    assert.equal(event.prediction, prediction);
+    assert.equal(absent(event, ["confidence", "severity", "modelScore", "modelThreshold"]), true);
+  }
+});
+
+test("local evidence: provenance versions are bounded the way the app ingests them", () => {
+  const provenance = (classification) => t.buildLocalProtectionEvent({
+    host: "openClaw",
+    hook: "pre_tool",
+    mode: "shadow",
+    rawText: "synthetic input",
+    classification,
+    policyDecision: "allow",
+    nativeAction: "allowed",
+    producer: "firewall-plugin",
+    producerVersion: "1.3.0",
+    pluginVersion: "1.3.0",
+    policyVersion: "openclaw-plugin-policy-v1",
+  }).provenance;
+  const withModel = (modelId) => provenance({ action: "allow", modelId });
+  const withPolicy = (policyVersion) => provenance({
+    action: "allow",
+    governance: { action: "allow", policyVersion },
+  });
+  for (const [raw, bounded] of [
+    ["  release-7  ", "release-7"],
+    ["re\u0000le\tase\u0085-7", "release-7"],
+    ["re\u200Ble\u00ADase\uFEFF-7", "release-7"],
+    ["\uD83Drelease\uDC00-7", "release-7"],
+    ["release-\u{1F512}", "release-\u{1F512}"],
+    ["a".repeat(128), "a".repeat(128)],
+    ["a".repeat(129), "a".repeat(128)],
+    ["\u00E9".repeat(65), "\u00E9".repeat(64)],
+    [`${"a".repeat(127)}\u00E9`, "a".repeat(127)],
+    [`${"a".repeat(126)}\u{1F512}`, "a".repeat(126)],
+  ]) {
+    assert.equal(withModel(raw).modelVersion, bounded);
+    assert.equal(withPolicy(raw).policyVersion, bounded);
+    assert.ok(Buffer.byteLength(bounded, "utf8") <= 128);
+  }
+  for (const absent of [undefined, null, 7, {}, ["release-7"], "", "   ", "\u200B\u0000"]) {
+    assert.equal(Object.hasOwn(withModel(absent), "modelVersion"), false);
+    assert.equal(withPolicy(absent).policyVersion, "openclaw-plugin-policy-v1");
+  }
+  assert.equal(provenance({ action: "allow" }).policyVersion, "openclaw-plugin-policy-v1");
+});
+
+test("local evidence: model and policy versions reach the event on every classifier deployment generation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-provenance-"));
+  const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
+  try {
+    for (const [name, deployment] of Object.entries(CLASSIFIER_DEPLOYMENTS)) {
+      await withClassifierDeployment(deployment.respond, async () => {
+        const env = registerPlugin({
+          pluginEntry: actualSdkMod.default,
+          config: {
+            apiKey: "test-key",
+            apiUrl: "https://firewall.invalid/classify",
+            timeoutMs: 1_000,
+            mode: "shadow",
+          },
+        });
+        for (const [command, policyVersion] of [
+          [GOVERNED_TEXT, "synthetic-policy"],
+          ["true", "openclaw-plugin-policy-v1"],
+        ]) {
+          const directory = path.join(root, `${name} ${policyVersion}`);
+          process.env.SILMARIL_LOCAL_EVENT_DIR = directory;
+          await withSilencedConsole(() => hook(env, "before_tool_call")(
+            { toolName: "exec", params: { command } },
+            {},
+          ));
+          const event = await readOnlyJSONEvent(directory);
+          assert.equal(event.provenance.policyVersion, policyVersion, name);
+          assert.equal(event.provenance.modelVersion, "synthetic-model", name);
+        }
+      });
+    }
+  } finally {
+    if (savedDirectory === undefined) delete process.env.SILMARIL_LOCAL_EVENT_DIR;
+    else process.env.SILMARIL_LOCAL_EVENT_DIR = savedDirectory;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("local evidence: prompt Warn reports the user-input boundary without raw content", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "silmaril-openclaw-prompt-warn-"));
   const savedDirectory = process.env.SILMARIL_LOCAL_EVENT_DIR;
@@ -3006,10 +3283,10 @@ test("local evidence: prompt Warn reports the user-input boundary without raw co
       process.env.SILMARIL_LOCAL_EVENT_DIR = directory;
       const env = registerPlugin({ config: { apiKey: "k", apiUrl: "u", mode: "warn" } });
       globalThis.__silmarilFirewallClassify = async () => ({
-        prediction: governanceOnly ? "BENIGN" : "MALICIOUS",
-        score: governanceOnly ? 0.01 : 0.99,
-        threshold: 0.5,
-        ...(governanceOnly ? { governance: { action: "block", policyVersion: "fixture" } } : {}),
+        action: "block",
+        ...(governanceOnly
+          ? { source: "governance", governance: { action: "block", policyVersion: "fixture" } }
+          : { source: "model", confidence: "very_high", severity: "high" }),
       });
       const warning = await withSilencedConsole(() => hook(env, "before_prompt_build")({
         prompt: "PROMPT_WARN_PRIVATE_CANARY",
@@ -3040,10 +3317,8 @@ test("local evidence: governance-only observer surfaces report unavailable witho
       config: { apiKey: "k", apiUrl: "u", mode: "block" },
     });
     globalThis.__silmarilFirewallClassify = async () => ({
-      prediction: "BENIGN",
-      score: 0.01,
-      threshold: 0.5,
-      primaryOutcome: "benign",
+      action: "block",
+      source: "governance",
       governance: { action: "block", policyVersion: "synthetic-policy" },
     });
     await withSilencedConsole(async () => {
@@ -3070,7 +3345,7 @@ test("local evidence: governance-only observer surfaces report unavailable witho
       && event.policyDecision === "monitor"
       && event.nativeAction === "unavailable"
       && event.blockUnavailable === true
-      && event.provenance.pluginVersion === "1.2.12"
+      && event.provenance.pluginVersion === "1.3.0"
     )));
   } finally {
     if (savedDirectory === undefined) {
@@ -3098,10 +3373,11 @@ test("local evidence: spool failure cannot weaken native blocking", async () => 
       },
     });
     globalThis.__silmarilFirewallClassify = async () => ({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      primaryOutcome: "system_compromise",
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "high",
+      outcome: "system_compromise",
     });
 
     const result = await withSilencedConsole(() => hook(env, "before_tool_call")(
@@ -3200,6 +3476,138 @@ test("mock classifier: flags configured markers for single and batch requests", 
     );
   } finally {
     await classifier.close();
+  }
+});
+
+test("mock classifier: serves both classify versions to the actual SDK", async () => {
+  const classifier = await startMockClassifier({ maliciousMarkers: ["UNIT_MARKER"] });
+  try {
+    const origin = new URL(classifier.url).origin;
+    for (const apiUrl of [classifier.url, `${origin}${V2_ROUTE}`]) {
+      const firewall = new RealFirewall({ apiKey: "unit-key", apiUrl, timeoutMs: 1_000 });
+      const blocked = await firewall.classify("has UNIT_MARKER inside", { hook: "tool_call" });
+      assert.deepEqual(
+        [blocked.action, blocked.source, blocked.confidence, blocked.severity, blocked.outcome],
+        ["block", "model", "very_high", "high", "control_abuse"],
+      );
+      assert.equal((await firewall.classify("plain text", { hook: "tool_call" })).action, "allow");
+      assert.deepEqual(
+        (await firewall.classifyBatch(["plain", "UNIT_MARKER"])).map((result) => result.action),
+        ["allow", "block"],
+      );
+    }
+    const version2 = await fetch(`${origin}${V2_ROUTE}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hook: "tool_call", text: "UNIT_MARKER" }),
+    });
+    assert.deepEqual(await version2.json(), {
+      results: [{
+        action: "block",
+        source: "model",
+        confidence: "very_high",
+        severity: "high",
+        outcome: "control_abuse",
+        governance: null,
+        model_id: null,
+      }],
+    });
+    const version1 = await postClassify(classifier, { hook: "tool_call", text: "UNIT_MARKER" });
+    assert.deepEqual(await version1.json(), { prediction: "MALICIOUS", score: 1 });
+    await classifier.settled();
+    assert.deepEqual(
+      classifier.requests.map((request) => request.decision),
+      ["block", "allow", "allow", "block", "allow", "allow", "block", "block"],
+    );
+  } finally {
+    await classifier.close();
+  }
+});
+
+test("mock classifier: live mode relays each classify version to the matching upstream route", async () => {
+  assert.equal(
+    upstreamRoute("https://classifier.unit.invalid/stage/classify?tenant=acme", V2_ROUTE),
+    "https://classifier.unit.invalid/stage/v2/classify?tenant=acme",
+  );
+  assert.equal(
+    upstreamRoute("https://classifier.unit.invalid/v2/classify/", V1_ROUTE),
+    "https://classifier.unit.invalid/classify",
+  );
+  assert.equal(
+    upstreamRoute("https://classifier.unit.invalid/base", V2_ROUTE),
+    "https://classifier.unit.invalid/base/v2/classify",
+  );
+
+  const upstreamUrls = [];
+  const classifier = await startMockClassifier({
+    maliciousMarkers: ["UNIT_ATTACK"],
+    live: {
+      url: "https://classifier.unit.invalid/classify",
+      key: "unit-live-key",
+      fetchImpl: async (url) => {
+        upstreamUrls.push(url);
+        return Response.json({ results: [{ action: "block", source: "model", confidence: "high" }] });
+      },
+    },
+  });
+  try {
+    const firewall = new RealFirewall({ apiKey: "unit-key", apiUrl: classifier.url, timeoutMs: 1_000 });
+    assert.equal((await firewall.classify("UNIT_ATTACK", { hook: "tool_response" })).action, "block");
+    await classifier.settled();
+    assert.deepEqual(upstreamUrls, ["https://classifier.unit.invalid/v2/classify"]);
+    const [record] = classifier.requests;
+    assert.deepEqual(
+      [record.status, record.decision, record.upstream],
+      [200, "block", { action: "block", source: "model" }],
+    );
+    assert.equal(liveBlocker(record), undefined);
+  } finally {
+    await classifier.close();
+  }
+});
+
+test("mock classifier: live mode passes a missing version 2 route to the SDK and records only the fallback", async () => {
+  for (const [status, refusalBody, contentType] of [
+    [403, JSON.stringify({ message: "Missing Authentication Token" }), "application/json"],
+    [404, "", "text/plain"],
+    [405, "<html><body>Method Not Allowed</body></html>", "text/html"],
+  ]) {
+    const upstreamUrls = [];
+    const refusal = new Response(refusalBody, { status, headers: { "content-type": contentType } });
+    const classifier = await startMockClassifier({
+      maliciousMarkers: ["UNIT_ATTACK"],
+      live: {
+        url: "https://classifier.unit.invalid/classify",
+        key: "unit-live-key",
+        fetchImpl: async (url) => {
+          upstreamUrls.push(url);
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          return url.endsWith(V2_ROUTE)
+            ? refusal
+            : Response.json({ prediction: "MALICIOUS", mode: "shadow" });
+        },
+      },
+    });
+    try {
+      const firewall = new RealFirewall({ apiKey: "unit-key", apiUrl: classifier.url, timeoutMs: 1_000 });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        assert.equal((await firewall.classify("UNIT_ATTACK", { hook: "tool_response" })).action, "block");
+      }
+      await classifier.settled();
+      assert.deepEqual(upstreamUrls, [
+        "https://classifier.unit.invalid/v2/classify",
+        "https://classifier.unit.invalid/classify",
+        "https://classifier.unit.invalid/classify",
+      ]);
+      assert.deepEqual(
+        classifier.requests.map((request) => [request.status, request.decision, request.upstream]),
+        Array(2).fill([200, "block", { prediction: "MALICIOUS", mode: "shadow", action: null }]),
+      );
+      assert.equal(refusal.bodyUsed, true);
+      assert.ok(classifier.requests[0].durationMs >= 300, `${classifier.requests[0].durationMs} ms`);
+    } finally {
+      await classifier.close();
+    }
   }
 });
 
@@ -3478,7 +3886,7 @@ test("customer entry: a wrong archive digest fails install and a missing live cr
     const base = {
       PATH: process.env.PATH,
       CUSTOMER_ARTIFACT: archive,
-      CUSTOMER_VERSION: "1.2.12",
+      CUSTOMER_VERSION: "1.3.0",
       CUSTOMER_SOURCE_SHA: "a".repeat(40),
       CUSTOMER_ARTIFACT_SHA256: "0".repeat(64),
       CUSTOMER_ARCHIVE_HELPER: path.join(root, "unpack_customer_plugin.py"),
